@@ -1,99 +1,125 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use super::*;
+use super::HashTtlCache;
+use std::time::{Duration, Instant};
 
+/// Tests that objects with an explicit TTL get evicted at the right time.
 #[test]
-fn with_default_ttl() {
-    // tests to ensure that an entry without an explicit TTL gets evicted at
-    // the right time (using the default TTL).
+fn evict_by_explicit_ttl_case1() {
     let now = Instant::now();
-    let later = now + Duration::from_secs(1);
+    let ttl = Duration::from_secs(1);
+    let later = now + ttl;
+    let mut cache = HashTtlCache::new(now, None);
 
-    let mut cache = HashTtlCache::new(now, Some(Duration::from_secs(1)));
-    cache.insert("a", 'a');
+    // Insert an object in the cache with a TTL.
+    cache.insert_with_ttl("a", 'a', Some(ttl));
     assert!(cache.get(&"a") == Some(&'a'));
+
+    // Advance clock and make sure that the object is not in the cache.
     cache.advance_clock(later);
-    let evicted = cache.try_evict(usize::max_value());
-    assert_eq!(evicted.len(), 1);
-    assert!(evicted.contains_key(&"a"));
+    cache.cleanup();
     assert!(cache.get(&"a").is_none());
 }
 
+/// Tests that objects with an explicit TTL get evicted at the right time.
 #[test]
-fn without_default_ttl() {
-    // tests to ensure that entries without a TTL do not get evicted.
+fn evict_by_explicit_ttl_case2() {
     let now = Instant::now();
-    let later = now + Duration::from_secs(1);
+    let ttl = Duration::from_secs(1);
+    let later = now + ttl;
+    let mut cache = HashTtlCache::new(now, Some(ttl + ttl));
 
-    let mut cache = HashTtlCache::new(now, Some(Duration::from_secs(1)));
+    // Insert an object in the cache with a TTL.
+    cache.insert_with_ttl("a", 'a', Some(ttl));
+    assert!(cache.get(&"a") == Some(&'a'));
+
+    // Advance clock and make sure that the object is not in the cache.
+    cache.advance_clock(later);
+    cache.cleanup();
+    assert!(cache.get(&"a").is_none());
+}
+
+/// Tests that objects without an explicit TTL get evicted using the default TTL.
+#[test]
+fn evict_by_default_ttl() {
+    let now = Instant::now();
+    let ttl = Duration::from_secs(1);
+    let later = now + ttl;
+    let mut cache = HashTtlCache::new(now, Some(ttl));
+
+    // Insert an object in the cache with the default TTL.
+    cache.insert("a", 'a');
+    assert!(cache.get(&"a") == Some(&'a'));
+
+    // Advance clock and make sure that the object is not in the cache.
+    cache.advance_clock(later);
+    cache.cleanup();
+    assert!(cache.get(&"a").is_none());
+}
+
+/// Tests that objects without a TTL do not get evicted.
+#[test]
+fn no_evict_excplicit() {
+    let now = Instant::now();
+    let ttl = Duration::from_secs(1);
+    let later = now + ttl;
+    let mut cache = HashTtlCache::new(now, Some(ttl));
+
+    // Insert an object in the cache without a TTL.
     cache.insert_with_ttl("a", 'a', None);
     assert!(cache.get(&"a") == Some(&'a'));
+
+    // Advance clock and make sure that the object is in the cache.
     cache.advance_clock(later);
-    let evicted = cache.try_evict(usize::max_value());
-    assert_eq!(evicted.len(), 0);
+    cache.cleanup();
     assert!(cache.get(&"a") == Some(&'a'));
 }
 
+/// Tests that objects with none as default TTL do not get evicted.
 #[test]
-fn with_explicit_ttl() {
-    // tests to ensure that an entry with an explicit TTL gets evicted at the
-    // right time.
+fn no_evict_default() {
     let now = Instant::now();
-    let later = now + Duration::from_secs(1);
+    let ttl = Duration::from_secs(1);
+    let later = now + ttl;
+    let mut cache = HashTtlCache::new(now, None);
 
-    let mut cache = HashTtlCache::new(now, Some(Duration::from_secs(2)));
-    cache.insert_with_ttl("a", 'a', Some(Duration::from_secs(1)));
-    assert!(cache.get(&"a") == Some(&'a'));
-    cache.advance_clock(later);
-    let evicted = cache.try_evict(usize::max_value());
-    assert_eq!(evicted.len(), 1);
-    assert!(evicted.contains_key(&"a"));
-    assert!(cache.get(&"a").is_none());
-}
-
-#[test]
-fn replace_entry() {
-    // tests to ensure that an entry that gets replaced doesn't get prematurely
-    // evicted.
-    let now = Instant::now();
-    let later = now + Duration::from_secs(1);
-    let even_later = now + Duration::from_secs(2);
-
-    let mut cache = HashTtlCache::new(now, Some(Duration::from_secs(1)));
+    // Insert an object in the cache with the default TTL.
     cache.insert("a", 'a');
     assert!(cache.get(&"a") == Some(&'a'));
-    cache.insert_with_ttl("a", 'a', Some(Duration::from_secs(2)));
+
+    // Advance clock and make sure that the object is in the cache.
     cache.advance_clock(later);
-    let evicted = cache.try_evict(usize::max_value());
-    assert_eq!(evicted.len(), 0);
+    cache.cleanup();
     assert!(cache.get(&"a") == Some(&'a'));
-    cache.advance_clock(even_later);
-    let evicted = cache.try_evict(usize::max_value());
-    assert_eq!(evicted.len(), 1);
-    assert!(evicted.contains_key(&"a"));
-    assert!(cache.get(&"a").is_none());
 }
 
+// Tests if objects that are replaced do not get prematurely evicted.
 #[test]
-fn limited_evictions() {
-    // tests to ensure that an entry without an explicit TTL gets evicted at
-    // the right time (using the default TTL).
+fn replace_object() {
     let now = Instant::now();
-    let later = now + Duration::from_secs(1);
+    let ttl = Duration::from_secs(2);
+    let default_ttl = Duration::from_secs(1);
+    let later = now + default_ttl;
+    let even_later = now + ttl;
+    let mut cache = HashTtlCache::new(now, Some(default_ttl));
 
-    let mut cache = HashTtlCache::new(now, Some(Duration::from_secs(1)));
-    cache.insert_with_ttl("a", 'a', Some(Duration::from_millis(500)));
+    // Insert an object in the cache with the default TTL.
+    cache.insert("a", 'a');
     assert!(cache.get(&"a") == Some(&'a'));
-    cache.insert("b", 'b');
-    assert!(cache.get(&"b") == Some(&'b'));
+
+    // Replace object using an explicit TTL.
+    let replaced = cache.insert_with_ttl("a", 'b', Some(ttl));
+    assert!(replaced == Some('a'));
+    assert!(cache.get(&"a") == Some(&'b'));
+
+    // Make sure that the object was replaced and is in the cache.
     cache.advance_clock(later);
-    let evicted = cache.try_evict(1);
-    assert_eq!(evicted.len(), 1);
-    assert!(evicted.contains_key(&"a"));
+    cache.cleanup();
+    assert!(cache.get(&"a") == Some(&'b'));
+
+    // Advance clock and make sure that the object is not in the cache.
+    cache.advance_clock(even_later);
+    cache.cleanup();
     assert!(cache.get(&"a").is_none());
-    let evicted = cache.try_evict(1);
-    assert_eq!(evicted.len(), 1);
-    assert!(evicted.contains_key(&"b"));
-    assert!(cache.get(&"b").is_none());
 }

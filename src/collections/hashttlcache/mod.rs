@@ -6,204 +6,143 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{
-    hash_map::Entry as HashMapEntry,
-    HashMap,
-};
 use std::{
-    cmp::Ordering,
-    collections::BinaryHeap,
-    fmt::Debug,
+    collections::HashMap,
     hash::Hash,
-    time::{
-        Duration,
-        Instant,
-    },
+    time::{Duration, Instant},
 };
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct Expiry(Instant);
-
-impl Expiry {
-    pub fn has_expired(&self, now: Instant) -> bool {
-        now >= self.0
-    }
-}
-
-impl Ord for Expiry {
-    fn cmp(&self, other: &Expiry) -> Ordering {
-        // `BinaryHeap` is a max-heap, so we need to reverse the order of
-        // comparisons in order to get `peek()` and `pop()` to return the
-        // smallest time.
-        match self.0.cmp(&other.0) {
-            Ordering::Equal => Ordering::Equal,
-            Ordering::Less => Ordering::Greater,
-            Ordering::Greater => Ordering::Less,
-        }
-    }
-}
-
-impl PartialOrd for Expiry {
-    fn partial_cmp(&self, other: &Expiry) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Debug)]
+/// An entry for the TTL cache.
+/// Values may be assigned to an expiration time or not.
 struct Record<V> {
+    /// Stored Value
     value: V,
-    expiry: Option<Expiry>,
+    /// Expiration Time
+    expiration: Option<Instant>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct Tombstone<K>
-where
-    K: Eq,
-{
-    key: K,
-    expiry: Expiry,
-}
-
-impl<K> Ord for Tombstone<K>
-where
-    K: Eq,
-{
-    fn cmp(&self, other: &Tombstone<K>) -> Ordering {
-        self.expiry.cmp(&other.expiry)
+impl<V> Record<V> {
+    /// Asserts if the target cache entry has expired.
+    fn has_expired(&self, now: Instant) -> bool {
+        if let Some(e) = self.expiration {
+            return now >= e;
+        }
+        false
     }
 }
 
-impl<K> PartialOrd for Tombstone<K>
-where
-    K: Eq,
-{
-    fn partial_cmp(&self, other: &Tombstone<K>) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// todo: `HashMap<>` has an `S` parameter that i'd like to include but causes
-// problems with the inference engine. the workaround is to leave it out but
-// what am i doing wrong?
-#[derive(Debug)]
+/// A TTL cache.  Entries in this structure fall in one of the following kinds:
+/// those that have an expiration time, and those that don't. The latter are
+/// assigned to `None` expiration.
 pub struct HashTtlCache<K, V>
 where
-    K: Eq + Hash,
+    K: Eq + Hash + Clone,
 {
+    /// Living values.
     map: HashMap<K, Record<V>>,
-    graveyard: BinaryHeap<Tombstone<K>>,
+    /// Dead values.
+    graveyard: HashMap<K, V>,
+    /// Default expiration.
     default_ttl: Option<Duration>,
+    // Current time.
     clock: Instant,
 }
-
-pub type Iter<'a, K, V> = dyn Iterator<Item = (&'a K, &'a V)>;
 
 impl<K, V> HashTtlCache<K, V>
 where
     K: Eq + Hash + Clone,
-    V: Clone,
 {
+    /// Instantiates an TTL cache.
     pub fn new(now: Instant, default_ttl: Option<Duration>) -> HashTtlCache<K, V> {
-        if let Some(ttl) = default_ttl {
-            assert!(ttl > Duration::new(0, 0));
-        }
-        let default_ttl = None;
-
         HashTtlCache {
             map: HashMap::default(),
-            graveyard: BinaryHeap::new(),
+            graveyard: HashMap::default(),
             default_ttl,
             clock: now,
         }
     }
 
-    pub fn insert_with_ttl(&mut self, key: K, value: V, ttl: Option<Duration>) -> Option<V> {
-        if let Some(ttl) = ttl {
-            assert!(ttl > Duration::new(0, 0));
-        }
-
-        let expiry = ttl.map(|dt| Expiry(self.clock + dt));
-
-        let old_value = match self.map.entry(key.clone()) {
-            HashMapEntry::Occupied(mut e) => {
-                let mut record = e.get_mut();
-                let old_value = if let Some(ref expiry) = record.expiry {
-                    if expiry.has_expired(self.clock) {
-                        None
-                    } else {
-                        Some(record.value.clone())
-                    }
-                } else {
-                    Some(record.value.clone())
-                };
-
-                record.value = value;
-                record.expiry = expiry.clone();
-
-                old_value
-            },
-            HashMapEntry::Vacant(e) => {
-                e.insert(Record {
-                    value,
-                    expiry: expiry.clone(),
-                });
-
-                None
-            },
-        };
-
-        if let Some(expiry) = expiry {
-            let expiry = Tombstone { key, expiry };
-
-            self.graveyard.push(expiry);
-        }
-
-        old_value
+    // Cleanups the cache.
+    pub fn clear(&mut self) {
+        self.graveyard.clear();
+        self.map.clear();
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        self.insert_with_ttl(key, value, self.default_ttl)
-    }
-
-    pub fn remove(&mut self, _key: &K) -> Option<V> {
-        None
-    }
-
-    pub fn get(&self, key: &K) -> Option<&V>
-    where
-        K: Debug,
-    {
-        trace!("HashTtlCache::get({:?})", key);
-        debug!("self.map.len() -> {:?}", self.map.len());
-        return self.map.get(key).map(|r| &r.value);
-    }
-
+    // Advances the internal clock of the cache.
     pub fn advance_clock(&mut self, now: Instant) {
         assert!(now >= self.clock);
         self.clock = now;
     }
 
-    pub fn try_evict(&mut self, _count: usize) -> HashMap<K, V> {
-        HashMap::default()
+    /// Inserts an entry in the cache. If there is an entry in the cache with
+    /// the same key, the value of that entry is updated and the old one is
+    /// returned.
+    pub fn insert_with_ttl(&mut self, key: K, value: V, ttl: Option<Duration>) -> Option<V> {
+        let expiration = if let Some(ttl) = ttl {
+            assert!(ttl > Duration::new(0, 0));
+            Some(self.clock + ttl)
+        } else {
+            None
+        };
+
+        self.cleanup();
+
+        let old_value = if let Some((_, v)) = self.map.remove_entry(&key) {
+            Some(v.value)
+        } else {
+            None
+        };
+
+        // Empty entry.
+        self.map.insert(key, Record { value, expiration });
+
+        old_value
     }
 
-    // todo: how do i implement `std::iter::IntoIterator` for this type?
-    // todo: how do i get `&cache` to alias to `cache.iter()`?
+    /// Inserts an entry in the cache using the default TTL value. If there is
+    /// an entry in the cache with the same key, the value of that entry is
+    /// updated and the old one is returned.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.insert_with_ttl(key, value, self.default_ttl)
+    }
+
+    /// Removes an entry from the cache.
+    pub fn remove(&mut self, _key: &K) -> Option<V> {
+        todo!()
+    }
+
+    // Gets an entry from the cache.
+    pub fn get(&self, key: &K) -> Option<&V> {
+        return self.map.get(key).map(|r| &r.value);
+    }
+
+    // Iterator.
     pub fn iter(&self) -> impl Iterator<Item = (&'_ K, &'_ V)> {
         let clock = self.clock;
         self.map.iter().flat_map(move |(key, record)| {
-            if let Some(e) = record.expiry.clone() {
-                if e.has_expired(clock) {
-                    return None;
-                }
+            if record.has_expired(clock) {
+                None
+            } else {
+                Some((key, &record.value))
             }
-
-            Some((key, &record.value))
         })
     }
 
-    pub fn clear(&mut self) {
-        self.map.clear();
-        self.graveyard.clear();
+    /// Collect dead entries in the cache.
+    pub fn cleanup(&mut self) {
+        let mut dead_entries: Vec<K> = Vec::new();
+
+        // Collect dead entries.
+        for (k, v) in self.map.iter() {
+            if v.has_expired(self.clock) {
+                dead_entries.push(k.clone());
+            }
+        }
+
+        // Put dead_entries entries in the graveyard.
+        for k in dead_entries {
+            let (k, v) = self.map.remove_entry(&k).unwrap();
+            self.graveyard.insert(k, v.value);
+        }
     }
 }

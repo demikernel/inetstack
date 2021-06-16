@@ -118,7 +118,7 @@ where
     }
 
     // Iterator.
-    pub fn iter(&self) -> impl Iterator<Item = (&'_ K, &'_ V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         let clock = self.clock;
         self.map.iter().flat_map(move |(key, record)| {
             if record.has_expired(clock) {

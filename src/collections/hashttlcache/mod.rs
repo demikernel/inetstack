@@ -53,6 +53,10 @@ where
 {
     /// Instantiates an TTL cache.
     pub fn new(now: Instant, default_ttl: Option<Duration>) -> HashTtlCache<K, V> {
+        if let Some(ttl) = default_ttl {
+            assert!(ttl > Duration::new(0, 0));
+        };
+
         HashTtlCache {
             map: HashMap::default(),
             graveyard: HashMap::default(),

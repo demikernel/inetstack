@@ -35,8 +35,7 @@ impl<V> Record<V> {
 /// Entries in this structure fall in one of the following kinds: those that
 /// have an expiration time, and those that don't. The latter are assigned to
 /// `None` expiration.
-pub struct HashTtlCache<K, V>
-{
+pub struct HashTtlCache<K, V> {
     /// Living values.
     map: HashMap<K, Record<V>>,
     /// Dead values.

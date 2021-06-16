@@ -81,12 +81,10 @@ where
     /// the same key, the value of that entry is updated and the old one is
     /// returned.
     pub fn insert_with_ttl(&mut self, key: K, value: V, ttl: Option<Duration>) -> Option<V> {
-        let expiration = if let Some(ttl) = ttl {
+        let expiration = ttl.map(|ttl| {
             assert!(ttl > Duration::new(0, 0));
-            Some(self.clock + ttl)
-        } else {
-            None
-        };
+            self.clock + ttl
+        });
 
         self.cleanup();
 

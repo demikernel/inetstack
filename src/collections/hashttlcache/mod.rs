@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-// todo: implement `HashMap` forwarding as needed.
-
 #[cfg(test)]
 mod tests;
 
@@ -12,7 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// An entry for the TTL cache.
+/// # TTL Cache Entry
+///
 /// Values may be assigned to an expiration time or not.
 struct Record<V> {
     /// Stored Value
@@ -31,9 +30,11 @@ impl<V> Record<V> {
     }
 }
 
-/// A TTL cache.  Entries in this structure fall in one of the following kinds:
-/// those that have an expiration time, and those that don't. The latter are
-/// assigned to `None` expiration.
+/// # TTL Cache
+///
+/// Entries in this structure fall in one of the following kinds: those that
+/// have an expiration time, and those that don't. The latter are assigned to
+/// `None` expiration.
 pub struct HashTtlCache<K, V>
 where
     K: Eq + Hash + Clone,
@@ -44,7 +45,7 @@ where
     graveyard: HashMap<K, V>,
     /// Default expiration.
     default_ttl: Option<Duration>,
-    // Current time.
+    /// Current time.
     clock: Instant,
 }
 

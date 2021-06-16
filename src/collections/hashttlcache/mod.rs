@@ -6,6 +6,7 @@ mod tests;
 
 use std::{
     collections::HashMap,
+    collections::hash_map::Entry as HashMapEntry,
     hash::Hash,
     time::{Duration, Instant},
 };
@@ -87,16 +88,17 @@ where
 
         self.cleanup();
 
-        let old_value = if let Some((_, v)) = self.map.remove_entry(&key) {
-            Some(v.value)
-        } else {
-            None
-        };
-
-        // Empty entry.
-        self.map.insert(key, Record { value, expiration });
-
-        old_value
+        let r = Record { value, expiration };
+        match self.map.entry(key) {
+            HashMapEntry::Occupied(mut o) => {
+                let old_record = o.insert(r);
+                Some(old_record.value)
+            }
+            HashMapEntry::Vacant(e) => {
+                e.insert(r);
+                None
+            }
+        }
     }
 
     /// Inserts an entry in the cache using the default TTL value. If there is

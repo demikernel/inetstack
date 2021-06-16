@@ -36,8 +36,6 @@ impl<V> Record<V> {
 /// have an expiration time, and those that don't. The latter are assigned to
 /// `None` expiration.
 pub struct HashTtlCache<K, V>
-where
-    K: Eq + Hash + Clone,
 {
     /// Living values.
     map: HashMap<K, Record<V>>,

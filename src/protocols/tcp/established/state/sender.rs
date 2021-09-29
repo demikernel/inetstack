@@ -151,7 +151,7 @@ impl<RT: Runtime> Sender<RT> {
                 self.unacked_queue.borrow_mut().push_back(unacked_segment);
                 if self.retransmit_deadline.get().is_none() {
                     let rto = self.rto.borrow().estimate();
-                    self.retransmit_deadline.set(Some(cb.rt.now() + rto));
+                    self.retransmit_deadline.set(Some(cb.rt.now() + 2 * rto));
                 }
                 return Ok(());
             }

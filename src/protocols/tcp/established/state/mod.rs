@@ -6,7 +6,10 @@ pub mod receiver;
 mod rto;
 pub mod sender;
 
-use self::{receiver::Receiver, sender::Sender};
+use self::{
+    receiver::{Receiver, ReceiverState},
+    sender::Sender,
+};
 use crate::{
     fail::Fail,
     protocols::{
@@ -76,9 +79,11 @@ impl<RT: Runtime> ControlBlock<RT> {
 
         // Check if we have acknowledged all bytes that we have received. If not, piggy back an ACK
         // on this message.
-        if let Some(ack_seq_no) = self.receiver.current_ack() {
-            header.ack_num = ack_seq_no;
-            header.ack = true;
+        if self.receiver.state.get() != ReceiverState::AckdFin {
+            if let Some(ack_seq_no) = self.receiver.current_ack() {
+                header.ack_num = ack_seq_no;
+                header.ack = true;
+            }
         }
         header
     }

@@ -76,6 +76,7 @@ impl<RT: Runtime> ControlBlock<RT> {
 
         // Check if we have acknowledged all bytes that we have received. If not, piggy back an ACK
         // on this message.
+        // ToDo: This is a bug.  Except for an active open SYN where we don't yet have a remote sequence number to ACK, we *always* ACK.
         if let Some(ack_seq_no) = self.receiver.current_ack() {
             header.ack_num = ack_seq_no;
             header.ack = true;

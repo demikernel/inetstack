@@ -10,6 +10,7 @@ mod options;
 mod passive_open;
 pub mod peer;
 pub mod segment;
+mod sequence_number;
 
 #[cfg(test)]
 mod tests;

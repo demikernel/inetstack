@@ -2,9 +2,12 @@
 // Licensed under the MIT license.
 
 use crate::protocols::{ipv4, tcp::SeqNumber};
+#[allow(unused_imports)]
 use crc::{crc32, Hasher32};
+#[allow(unused_imports)]
 use std::{hash::Hasher, num::Wrapping};
 
+#[allow(dead_code)]
 pub struct IsnGenerator {
     nonce: u32,
     counter: Wrapping<u16>,
@@ -18,6 +21,12 @@ impl IsnGenerator {
         }
     }
 
+    #[cfg(test)]
+    pub fn generate(&mut self, _local: &ipv4::Endpoint, _remote: &ipv4::Endpoint) -> SeqNumber {
+        Wrapping(0)
+    }
+
+    #[cfg(not(test))]
     pub fn generate(&mut self, local: &ipv4::Endpoint, remote: &ipv4::Endpoint) -> SeqNumber {
         let mut hash = crc32::Digest::new(crc32::IEEE);
         hash.write_u32(remote.address().into());

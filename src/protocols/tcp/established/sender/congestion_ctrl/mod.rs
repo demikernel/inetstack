@@ -1,9 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use super::sender::Sender;
 use crate::{collections::watched::WatchFuture, protocols::tcp::SeqNumber, runtime::Runtime};
-use std::fmt::Debug;
+use std::{fmt::Debug, time::Duration};
 
 mod cubic;
 mod none;
@@ -23,15 +22,22 @@ pub trait SlowStartCongestionAvoidance<RT: Runtime> {
     }
 
     // Called immediately before the cwnd check is performed before data is sent
-    fn on_cwnd_check_before_send(&self, _sender: &Sender<RT>) {}
+    fn on_cwnd_check_before_send(&self) {}
 
-    fn on_ack_received(&self, _sender: &Sender<RT>, _ack_seq_no: SeqNumber) {}
+    fn on_ack_received(
+        &self,
+        _rto: Duration,
+        _base_seq_no: SeqNumber,
+        _sent_seq_no: SeqNumber,
+        _ack_seq_no: SeqNumber,
+    ) {
+    }
 
     // Called immediately before retransmit after RTO
-    fn on_rto(&self, _sender: &Sender<RT>) {}
+    fn on_rto(&self, _base_seq_no: SeqNumber) {}
 
     // Called immediately before a segment is sent for the 1st time
-    fn on_send(&self, _sender: &Sender<RT>, _num_sent_bytes: u32) {}
+    fn on_send(&self, _rto: Duration, _num_sent_bytes: u32) {}
 }
 
 pub trait FastRetransmitRecovery<RT: Runtime>
@@ -49,8 +55,8 @@ where
         (false, WatchFuture::Pending)
     }
 
-    fn on_fast_retransmit(&self, _sender: &Sender<RT>) {}
-    fn on_base_seq_no_wraparound(&self, _sender: &Sender<RT>) {}
+    fn on_fast_retransmit(&self) {}
+    fn on_base_seq_no_wraparound(&self) {}
 }
 
 pub trait LimitedTransmit<RT: Runtime>

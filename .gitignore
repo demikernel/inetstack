@@ -14,6 +14,6 @@ Cargo.lock
 *.pdb
 
 # IDEs
-.vscode/tasks.json
+.vscode/
 *.swo
 *.swp

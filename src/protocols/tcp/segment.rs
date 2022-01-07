@@ -188,8 +188,8 @@ pub struct TcpHeader {
     // checksum: u16
     pub urgent_pointer: u16,
 
-    num_options: usize,
-    option_list: [TcpOptions2; MAX_TCP_OPTIONS],
+    pub num_options: usize,
+    pub option_list: [TcpOptions2; MAX_TCP_OPTIONS],
 }
 
 impl TcpHeader {

@@ -65,8 +65,6 @@ impl TestRuntime {
         );
 
         let tcp_options = tcp::Options::<Self>::default();
-        let tcp_options = tcp_options.advertised_mss(2048);
-        let tcp_options = tcp_options.window_scale(2);
 
         let inner = Inner {
             name,
@@ -87,6 +85,10 @@ impl TestRuntime {
 
     pub fn pop_frame(&self) -> Bytes {
         self.inner.borrow_mut().outgoing.pop_front().unwrap()
+    }
+
+    pub fn pop_frame_unchecked(&self) -> Option<Bytes> {
+        self.inner.borrow_mut().outgoing.pop_front()
     }
 
     pub fn push_frame(&self, buf: Bytes) {

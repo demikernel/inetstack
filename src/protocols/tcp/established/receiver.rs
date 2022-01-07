@@ -2,7 +2,10 @@
 // Licensed under the MIT license.
 
 use crate::{
-    collections::watched::WatchedValue, fail::Fail, protocols::tcp::SeqNumber, runtime::Runtime,
+    collections::watched::{WatchFuture, WatchedValue},
+    fail::Fail,
+    protocols::tcp::SeqNumber,
+    runtime::Runtime,
 };
 use std::{
     cell::RefCell,
@@ -16,20 +19,8 @@ use std::{
 const RECV_QUEUE_SZ: usize = 2048;
 const MAX_OUT_OF_ORDER: usize = 16;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReceiverState {
-    /// Connection has been established.
-    Open,
-    /// We have received a FIN from other side.
-    ReceivedFin,
-    /// We have ACKed the FIN.
-    AckdFin,
-}
-
 #[derive(Debug)]
 pub struct Receiver<RT: Runtime> {
-    pub state: WatchedValue<ReceiverState>,
-
     //                     |-----------------recv_window-------------------|
     //                base_seq_no             ack_seq_no             recv_seq_no
     //                     v                       v                       v
@@ -41,36 +32,64 @@ pub struct Receiver<RT: Runtime> {
     // an ACK. The sender, however, will still be computing the receive window relative to the
     // the old `ack_seq_no` until we send them an ACK (see the diagram in sender.rs).
     //
-    pub base_seq_no: WatchedValue<SeqNumber>,
-    pub recv_queue: RefCell<VecDeque<RT::Buf>>,
+    base_seq_no: WatchedValue<SeqNumber>,
+    recv_queue: RefCell<VecDeque<RT::Buf>>,
     /// Running counter of ack sequence number we have sent to peer.
-    pub ack_seq_no: WatchedValue<SeqNumber>,
+    ack_seq_no: WatchedValue<SeqNumber>,
     /// Our sequence number based on how much data we have sent.
-    pub recv_seq_no: WatchedValue<SeqNumber>,
+    recv_seq_no: WatchedValue<SeqNumber>,
 
-    pub ack_deadline: WatchedValue<Option<Instant>>,
+    /// Timeout for delayed ACKs.
+    ack_delay_timeout: Duration,
 
-    pub max_window_size: u32,
-    pub window_scale: u32,
+    ack_deadline: WatchedValue<Option<Instant>>,
+
+    max_window_size: u32,
+    window_scale: u32,
 
     waker: RefCell<Option<Waker>>,
     out_of_order: RefCell<BTreeMap<SeqNumber, RT::Buf>>,
 }
 
 impl<RT: Runtime> Receiver<RT> {
-    pub fn new(seq_no: SeqNumber, max_window_size: u32, window_scale: u32) -> Self {
+    pub fn new(
+        seq_no: SeqNumber,
+        ack_delay_timeout: Duration,
+        max_window_size: u32,
+        window_scale: u32,
+    ) -> Self {
         Self {
-            state: WatchedValue::new(ReceiverState::Open),
             base_seq_no: WatchedValue::new(seq_no),
             recv_queue: RefCell::new(VecDeque::with_capacity(RECV_QUEUE_SZ)),
             ack_seq_no: WatchedValue::new(seq_no),
             recv_seq_no: WatchedValue::new(seq_no),
+            ack_delay_timeout,
             ack_deadline: WatchedValue::new(None),
             max_window_size,
             window_scale,
             waker: RefCell::new(None),
             out_of_order: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    pub fn get_ack_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+        self.ack_seq_no.watch()
+    }
+
+    pub fn set_ack_seq_no(&self, new_value: Wrapping<u32>) {
+        self.ack_seq_no.set(new_value)
+    }
+
+    pub fn get_recv_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+        self.recv_seq_no.watch()
+    }
+
+    pub fn get_ack_deadline(&self) -> (Option<Instant>, WatchFuture<Option<Instant>>) {
+        self.ack_deadline.watch()
+    }
+
+    pub fn set_ack_deadline(&self, when: Option<Instant>) {
+        self.ack_deadline.set(when);
     }
 
     pub fn hdr_window_size(&self) -> u16 {
@@ -104,70 +123,8 @@ impl<RT: Runtime> Receiver<RT> {
         }
     }
 
-    /// This packet has the ACK bit set. Ensure this ack sequence number is correct and update our
-    /// internal ACK sequence counter.
-    pub fn update_ack_sent(&self, ack_seq: SeqNumber) {
-        // FINs are special. Even though we don't receive any data, our ACK should be + 1 the
-        // seq we received.
-        if self.state.get() == ReceiverState::AckdFin {
-            assert_eq!(ack_seq, self.recv_seq_no.get() + Wrapping(1));
-        } else {
-            assert_eq!(ack_seq, self.recv_seq_no.get());
-        }
-        self.ack_deadline.set(None);
-        self.ack_seq_no.set(ack_seq);
-    }
-
-    pub fn peek(&self) -> Result<RT::Buf, Fail> {
-        if self.base_seq_no.get() == self.recv_seq_no.get() {
-            if self.state.get() != ReceiverState::Open {
-                return Err(Fail::ResourceNotFound {
-                    details: "Receiver closed",
-                });
-            }
-            return Err(Fail::ResourceExhausted {
-                details: "No available data",
-            });
-        }
-
-        let segment = self
-            .recv_queue
-            .borrow_mut()
-            .front()
-            .expect("recv_seq > base_seq without data in queue?")
-            .clone();
-
-        Ok(segment)
-    }
-
-    pub fn recv(&self) -> Result<Option<RT::Buf>, Fail> {
-        if self.base_seq_no.get() == self.recv_seq_no.get() {
-            if self.state.get() != ReceiverState::Open {
-                return Err(Fail::ResourceNotFound {
-                    details: "Receiver closed",
-                });
-            }
-            return Ok(None);
-        }
-
-        let segment = self
-            .recv_queue
-            .borrow_mut()
-            .pop_front()
-            .expect("recv_seq > base_seq without data in queue?");
-        self.base_seq_no
-            .modify(|b| b + Wrapping(segment.len() as u32));
-
-        Ok(Some(segment))
-    }
-
     pub fn poll_recv(&self, ctx: &mut Context) -> Poll<Result<RT::Buf, Fail>> {
         if self.base_seq_no.get() == self.recv_seq_no.get() {
-            if self.state.get() != ReceiverState::Open {
-                return Poll::Ready(Err(Fail::ResourceNotFound {
-                    details: "Receiver closed",
-                }));
-            }
             *self.waker.borrow_mut() = Some(ctx.waker().clone());
             return Poll::Pending;
         }
@@ -183,18 +140,7 @@ impl<RT: Runtime> Receiver<RT> {
         Poll::Ready(Ok(segment))
     }
 
-    pub fn receive_fin(&self) {
-        // Even if we've already ACKd the FIN, we need to resend the ACK if we receive another FIN.
-        self.state.set(ReceiverState::ReceivedFin);
-    }
-
     pub fn receive_data(&self, seq_no: SeqNumber, buf: RT::Buf, now: Instant) -> Result<(), Fail> {
-        if self.state.get() != ReceiverState::Open {
-            return Err(Fail::ResourceNotFound {
-                details: "Receiver closed",
-            });
-        }
-
         let recv_seq_no = self.recv_seq_no.get();
         if seq_no > recv_seq_no {
             let mut out_of_order = self.out_of_order.borrow_mut();
@@ -235,9 +181,7 @@ impl<RT: Runtime> Receiver<RT> {
 
         // TODO: How do we handle when the other side is in PERSIST state here?
         if self.ack_deadline.get().is_none() {
-            // TODO: Configure this value (and also maybe just have an RT pointer here.)
-            self.ack_deadline
-                .set(Some(now + Duration::from_millis(500)));
+            self.ack_deadline.set(Some(now + self.ack_delay_timeout));
         }
 
         let new_recv_seq_no = self.recv_seq_no.get();
@@ -253,25 +197,5 @@ impl<RT: Runtime> Receiver<RT> {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Receiver;
-    use crate::collections::bytes::BytesMut;
-    use crate::fail::Fail;
-    use crate::test_helpers::TestRuntime;
-    use must_let::must_let;
-    use std::{num::Wrapping, time::Instant};
-
-    #[test]
-    fn test_out_of_order() {
-        let now = Instant::now();
-        let receiver = Receiver::<TestRuntime>::new(Wrapping(0), 65536, 0);
-        let buf = BytesMut::zeroed(16).unwrap().freeze();
-        must_let!(let Err(Fail::Ignored { .. }) = receiver.receive_data(Wrapping(16), buf.clone(), now));
-        must_let!(let Ok(..) = receiver.receive_data(Wrapping(0), buf.clone(), now));
-        assert_eq!(receiver.recv_seq_no.get(), Wrapping(32))
     }
 }

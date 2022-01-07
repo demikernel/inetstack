@@ -6,9 +6,10 @@ name: Build
 on:
   push:
     branches:
+      - bugfix-*
       - enhancement-*
       - feature-*
-      - bugfix-*
+      - workaround-*
 
 env:
   CARGO_TERM_COLOR: always

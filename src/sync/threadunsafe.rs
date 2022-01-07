@@ -27,23 +27,6 @@ impl SharedWaker {
         Self(Rc::new(WakerSlot(UnsafeCell::new(None))))
     }
 
-    // TODO: It seems this method is never used? I don't understand how the shared waker works then
-    // TODO: since no waker is ever actually called.
-    #[allow(unused)]
-    fn register(&self, waker: &Waker) {
-        let s = unsafe {
-            let waker = &self.0;
-            let cell = &waker.0;
-            &mut *cell.get()
-        };
-        if let Some(ref existing_waker) = s {
-            if waker.will_wake(existing_waker) {
-                return;
-            }
-        }
-        *s = Some(waker.clone());
-    }
-
     pub fn wake(&self) {
         let s = unsafe {
             let waker = &self.0;

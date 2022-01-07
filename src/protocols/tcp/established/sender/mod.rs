@@ -1,13 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use super::{congestion_ctrl as cc, rto::RtoCalculator};
+pub mod congestion_ctrl;
+mod rto;
+
+use super::ControlBlock;
 use crate::{
-    collections::watched::WatchedValue,
+    collections::watched::{WatchFuture, WatchedValue},
     fail::Fail,
     protocols::tcp::SeqNumber,
     runtime::{Runtime, RuntimeBuf},
 };
+use congestion_ctrl as cc;
+use rto::RtoCalculator;
 use std::{
     boxed::Box,
     cell::RefCell,
@@ -24,20 +29,10 @@ pub struct UnackedSegment<RT: Runtime> {
     pub initial_tx: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SenderState {
-    Open,
-    Closed,
-    /// We sent our FIN to close connection.
-    SentFin,
-    /// The FIN we previously sent has been acknowledged by by the other side.
-    FinAckd,
-    Reset,
-}
+/// Hard limit for unsent queue.
+const UNSENT_QUEUE_CUTOFF: usize = 1024;
 
 pub struct Sender<RT: Runtime> {
-    pub state: WatchedValue<SenderState>,
-
     // TODO: Just use Figure 5 from RFC 793 here.
     //
     //                    |------------window_size------------|
@@ -47,22 +42,22 @@ pub struct Sender<RT: Runtime> {
     // ... ---------------|-------------------------|----------------------| (unavailable)
     //       acknowledged        unacknowledged     ^        unsent
     //
-    pub base_seq_no: WatchedValue<SeqNumber>,
-    pub unacked_queue: RefCell<VecDeque<UnackedSegment<RT>>>,
-    pub sent_seq_no: WatchedValue<SeqNumber>,
-    pub unsent_queue: RefCell<VecDeque<RT::Buf>>,
-    pub unsent_seq_no: WatchedValue<SeqNumber>,
+    base_seq_no: WatchedValue<SeqNumber>,
+    unacked_queue: RefCell<VecDeque<UnackedSegment<RT>>>,
+    sent_seq_no: WatchedValue<SeqNumber>,
+    unsent_queue: RefCell<VecDeque<RT::Buf>>,
+    unsent_seq_no: WatchedValue<SeqNumber>,
 
-    pub window_size: WatchedValue<u32>,
+    window_size: WatchedValue<u32>,
     // RFC 1323: Number of bits to shift advertised window, defaults to zero.
-    pub window_scale: u8,
+    window_scale: u8,
 
-    pub mss: usize,
+    mss: usize,
 
-    pub retransmit_deadline: WatchedValue<Option<Instant>>,
-    pub rto: RefCell<RtoCalculator>,
+    retransmit_deadline: WatchedValue<Option<Instant>>,
+    rto: RefCell<RtoCalculator>,
 
-    pub congestion_ctrl: Box<dyn cc::CongestionControl<RT>>,
+    congestion_ctrl: Box<dyn cc::CongestionControl<RT>>,
 }
 
 impl<RT: Runtime> fmt::Debug for Sender<RT> {
@@ -90,8 +85,6 @@ impl<RT: Runtime> Sender<RT> {
         congestion_control_options: Option<cc::Options>,
     ) -> Self {
         Self {
-            state: WatchedValue::new(SenderState::Open),
-
             base_seq_no: WatchedValue::new(seq_no),
             unacked_queue: RefCell::new(VecDeque::new()),
             sent_seq_no: WatchedValue::new(seq_no),
@@ -109,12 +102,55 @@ impl<RT: Runtime> Sender<RT> {
         }
     }
 
-    pub fn send(&self, buf: RT::Buf, cb: &super::ControlBlock<RT>) -> Result<(), Fail> {
-        if self.state.get() != SenderState::Open {
-            return Err(Fail::Ignored {
-                details: "Sender closed",
-            });
-        }
+    pub fn get_mss(&self) -> usize {
+        self.mss
+    }
+
+    pub fn get_window_size(&self) -> (u32, WatchFuture<u32>) {
+        self.window_size.watch()
+    }
+
+    pub fn get_base_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+        self.base_seq_no.watch()
+    }
+
+    pub fn get_sent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+        self.sent_seq_no.watch()
+    }
+
+    pub fn modify_sent_seq_no(&self, f: impl FnOnce(Wrapping<u32>) -> Wrapping<u32>) {
+        self.sent_seq_no.modify(f)
+    }
+
+    pub fn get_unsent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+        self.unsent_seq_no.watch()
+    }
+
+    pub fn get_retransmit_deadline(&self) -> (Option<Instant>, WatchFuture<Option<Instant>>) {
+        self.retransmit_deadline.watch()
+    }
+
+    pub fn set_retransmit_deadline(&self, when: Option<Instant>) {
+        self.retransmit_deadline.set(when);
+    }
+
+    pub fn pop_unacked_segment(&self) -> Option<UnackedSegment<RT>> {
+        self.unacked_queue.borrow_mut().pop_front()
+    }
+
+    pub fn push_unacked_segment(&self, segment: UnackedSegment<RT>) {
+        self.unacked_queue.borrow_mut().push_back(segment)
+    }
+
+    pub fn rto_estimate(&self) -> Duration {
+        self.rto.borrow().estimate()
+    }
+
+    pub fn rto_record_failure(&self) {
+        self.rto.borrow_mut().record_failure()
+    }
+
+    pub fn send(&self, buf: RT::Buf, cb: &ControlBlock<RT>) -> Result<(), Fail> {
         let buf_len: u32 = buf.len().try_into().map_err(|_| Fail::Ignored {
             details: "Buffer too large",
         })?;
@@ -128,34 +164,49 @@ impl<RT: Runtime> Sender<RT> {
         let in_flight_after_send = sent_data + buf_len;
 
         // Before we get cwnd for the check, we prompt it to shrink it if the connection has been idle
-        self.congestion_ctrl.on_cwnd_check_before_send(&self);
+        self.congestion_ctrl.on_cwnd_check_before_send();
         let cwnd = self.congestion_ctrl.get_cwnd();
         // The limited transmit algorithm can increase the effective size of cwnd by up to 2MSS
         let effective_cwnd = cwnd + self.congestion_ctrl.get_limited_transmit_cwnd_increase();
 
-        if win_sz > 0 && win_sz >= in_flight_after_send && effective_cwnd >= in_flight_after_send {
-            if let Some(remote_link_addr) = cb.arp.try_query(cb.remote.address()) {
-                // This hook is primarily intended to record the last time we sent data, so we can later tell if the connection has been idle
-                self.congestion_ctrl.on_send(&self, sent_data);
+        if self.unsent_queue.borrow().len() == 0 {
+            if win_sz > 0
+                && win_sz >= in_flight_after_send
+                && effective_cwnd >= in_flight_after_send
+            {
+                if let Some(remote_link_addr) = cb.arp().try_query(cb.get_remote().address()) {
+                    // This hook is primarily intended to record the last time we sent data, so we can later tell if the connection has been idle
 
-                let mut header = cb.tcp_header();
-                header.seq_num = sent_seq;
-                cb.emit(header, buf.clone(), remote_link_addr);
+                    let rto: Duration = self.current_rto();
+                    self.congestion_ctrl.on_send(rto, sent_data);
 
-                self.unsent_seq_no.modify(|s| s + Wrapping(buf_len));
-                self.sent_seq_no.modify(|s| s + Wrapping(buf_len));
-                let unacked_segment = UnackedSegment {
-                    bytes: buf,
-                    initial_tx: Some(cb.rt.now()),
-                };
-                self.unacked_queue.borrow_mut().push_back(unacked_segment);
-                if self.retransmit_deadline.get().is_none() {
-                    let rto = self.rto.borrow().estimate();
-                    self.retransmit_deadline.set(Some(cb.rt.now() + rto));
+                    let mut header = cb.tcp_header();
+                    header.seq_num = sent_seq;
+                    cb.emit(header, buf.clone(), remote_link_addr);
+
+                    self.unsent_seq_no.modify(|s| s + Wrapping(buf_len));
+                    self.sent_seq_no.modify(|s| s + Wrapping(buf_len));
+                    let unacked_segment = UnackedSegment {
+                        bytes: buf,
+                        initial_tx: Some(cb.rt().now()),
+                    };
+                    self.unacked_queue.borrow_mut().push_back(unacked_segment);
+                    if self.retransmit_deadline.get().is_none() {
+                        let rto = self.rto.borrow().estimate();
+                        self.retransmit_deadline.set(Some(cb.rt().now() + rto));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
+
+        // Too fast.
+        if self.unsent_queue.borrow().len() > UNSENT_QUEUE_CUTOFF {
+            return Err(Fail::ResourceBusy {
+                details: "too many packets to send",
+            });
+        }
+
         // Slow path: Delegating sending the data to background processing.
         self.unsent_queue.borrow_mut().push_back(buf);
         self.unsent_seq_no.modify(|s| s + Wrapping(buf_len));
@@ -163,30 +214,7 @@ impl<RT: Runtime> Sender<RT> {
         Ok(())
     }
 
-    pub fn close(&self) -> Result<(), Fail> {
-        if self.state.get() != SenderState::Open {
-            return Err(Fail::Ignored {
-                details: "Sender closed",
-            });
-        }
-        self.state.set(SenderState::Closed);
-        Ok(())
-    }
-
-    pub fn receive_rst(&self) {
-        self.state.set(SenderState::Reset);
-    }
-
     pub fn remote_ack(&self, ack_seq_no: SeqNumber, now: Instant) -> Result<(), Fail> {
-        if self.state.get() == SenderState::SentFin
-            && ack_seq_no == self.base_seq_no.get() + Wrapping(1)
-        {
-            assert_eq!(self.base_seq_no.get(), self.sent_seq_no.get());
-            assert_eq!(self.sent_seq_no.get(), self.unsent_seq_no.get());
-            self.state.set(SenderState::FinAckd);
-            return Ok(());
-        }
-
         let base_seq_no = self.base_seq_no.get();
         let sent_seq_no = self.sent_seq_no.get();
 
@@ -199,7 +227,9 @@ impl<RT: Runtime> Sender<RT> {
             });
         }
 
-        self.congestion_ctrl.on_ack_received(&self, ack_seq_no);
+        let rto: Duration = self.current_rto();
+        self.congestion_ctrl
+            .on_ack_received(rto, base_seq_no, sent_seq_no, ack_seq_no);
         if bytes_acknowledged == Wrapping(0) {
             return Ok(());
         }
@@ -237,7 +267,7 @@ impl<RT: Runtime> Sender<RT> {
         let new_base_seq_no = self.base_seq_no.get();
         if new_base_seq_no < base_seq_no {
             // We've wrapped around, and so we need to do some bookkeeping
-            self.congestion_ctrl.on_base_seq_no_wraparound(&self);
+            self.congestion_ctrl.on_base_seq_no_wraparound();
         }
 
         Ok(())
@@ -275,13 +305,12 @@ impl<RT: Runtime> Sender<RT> {
         Some(buf)
     }
 
-    pub fn update_remote_window(&self, window_size_hdr: u16) -> Result<(), Fail> {
-        if self.state.get() != SenderState::Open {
-            return Err(Fail::Ignored {
-                details: "Dropping remote window update for closed sender",
-            });
-        }
+    pub fn top_size_unsent(&self) -> Option<usize> {
+        let unsent_queue = self.unsent_queue.borrow_mut();
+        Some(unsent_queue.front()?.len())
+    }
 
+    pub fn update_remote_window(&self, window_size_hdr: u16) -> Result<(), Fail> {
         // TODO: Is this the right check?
         let window_size = (window_size_hdr as u32)
             .checked_shl(self.window_scale as u32)
@@ -304,5 +333,33 @@ impl<RT: Runtime> Sender<RT> {
 
     pub fn current_rto(&self) -> Duration {
         self.rto.borrow().estimate()
+    }
+
+    pub fn congestion_ctrl_watch_retransmit_now_flag(&self) -> (bool, WatchFuture<bool>) {
+        self.congestion_ctrl.watch_retransmit_now_flag()
+    }
+
+    pub fn congestion_ctrl_on_fast_retransmit(&self) {
+        self.congestion_ctrl.on_fast_retransmit()
+    }
+
+    pub fn congestion_ctrl_on_rto(&self, base_seq_no: Wrapping<u32>) {
+        self.congestion_ctrl.on_rto(base_seq_no)
+    }
+
+    pub fn congestion_ctrl_on_send(&self, rto: Duration, num_sent_bytes: u32) {
+        self.congestion_ctrl.on_send(rto, num_sent_bytes)
+    }
+
+    pub fn congestion_ctrl_on_cwnd_check_before_send(&self) {
+        self.congestion_ctrl.on_cwnd_check_before_send()
+    }
+
+    pub fn congestion_ctrl_watch_cwnd(&self) -> (u32, WatchFuture<u32>) {
+        self.congestion_ctrl.watch_cwnd()
+    }
+
+    pub fn congestion_ctrl_watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<u32>) {
+        self.congestion_ctrl.watch_limited_transmit_cwnd_increase()
     }
 }

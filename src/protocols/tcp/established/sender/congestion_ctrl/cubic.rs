@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use super::super::sender::Sender;
 use super::{
     CongestionControl, FastRetransmitRecovery, LimitedTransmit, Options,
     SlowStartCongestionAvoidance,
@@ -117,7 +116,7 @@ impl Cubic {
         duplicate_ack_count
     }
 
-    fn on_dup_ack_received<RT: Runtime>(&self, sender: &Sender<RT>, ack_seq_no: SeqNumber) {
+    fn on_dup_ack_received(&self, sent_seq_no: Wrapping<u32>, ack_seq_no: SeqNumber) {
         // Get and increment the duplicate ACK count, and store the updated value
         let duplicate_ack_count = self.increment_dup_ack_count();
 
@@ -138,7 +137,7 @@ impl Cubic {
         {
             // Check against recover specified in RFC6582
             self.in_fast_recovery.set(true);
-            self.recover.set(sender.sent_seq_no.get());
+            self.recover.set(sent_seq_no);
             let reduced_cwnd = (cwnd as f32 * Self::BETA_CUBIC) as u32;
 
             if self.fast_convergence {
@@ -156,13 +155,14 @@ impl Cubic {
         }
     }
 
-    fn on_ack_received_fast_recovery<RT: Runtime>(
+    fn on_ack_received_fast_recovery(
         &self,
-        sender: &Sender<RT>,
+        base_seq_no: SeqNumber,
+        sent_seq_no: SeqNumber,
         ack_seq_no: SeqNumber,
     ) {
-        let bytes_outstanding = sender.sent_seq_no.get() - sender.base_seq_no.get();
-        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
+        let bytes_outstanding = sent_seq_no - base_seq_no;
+        let bytes_acknowledged = ack_seq_no - base_seq_no;
         let mss = self.mss;
 
         if ack_seq_no > self.recover.get() {
@@ -212,8 +212,8 @@ impl Cubic {
         w_max * bc + ((3. * (1. - bc) / (1. + bc)) * t / rtt)
     }
 
-    fn on_ack_received_ss_ca<RT: Runtime>(&self, sender: &Sender<RT>, ack_seq_no: SeqNumber) {
-        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
+    fn on_ack_received_ss_ca(&self, rto: Duration, base_seq_no: SeqNumber, ack_seq_no: SeqNumber) {
+        let bytes_acknowledged = ack_seq_no - base_seq_no;
         let mss = self.mss;
         let cwnd = self.cwnd.get();
         let ssthresh = self.ssthresh.get();
@@ -224,7 +224,7 @@ impl Cubic {
         } else {
             // Congestion avoidance
             let t = self.ca_start.get().elapsed().as_secs_f32();
-            let rtt = sender.current_rto().as_secs_f32();
+            let rtt = rto.as_secs_f32();
             let mss_f32 = mss as f32;
             let normalised_w_max = self.w_max.get() as f32 / mss_f32;
             let k = self.k(normalised_w_max);
@@ -234,7 +234,7 @@ impl Cubic {
                 self.cwnd.set((w_est * mss_f32) as u32);
             } else {
                 let cwnd_f32 = cwnd as f32;
-                // Again, do everythin in terms of units of MSS
+                // Again, do everything in terms of units of MSS
                 let normalised_cwnd = cwnd_f32 / mss_f32;
                 let cwnd_inc = ((self.w_cubic(normalised_w_max, t + rtt, k) - normalised_cwnd)
                     / normalised_cwnd)
@@ -270,9 +270,9 @@ impl Cubic {
         self.last_congestion_was_rto.set(true);
     }
 
-    fn on_rto_fast_recovery<RT: Runtime>(&self, sender: &Sender<RT>) {
+    fn on_rto_fast_recovery(&self, base_seq_no: SeqNumber) {
         // Exit fast recovery/retransmit
-        self.recover.set(sender.sent_seq_no.get());
+        self.recover.set(base_seq_no);
         self.in_fast_recovery.set(false);
     }
 }
@@ -285,7 +285,7 @@ impl<RT: Runtime> SlowStartCongestionAvoidance<RT> for Cubic {
         self.cwnd.watch()
     }
 
-    fn on_cwnd_check_before_send(&self, _sender: &Sender<RT>) {
+    fn on_cwnd_check_before_send(&self) {
         let long_time_since_send =
             Instant::now().duration_since(self.last_send_time.get()) > self.rtt_at_last_send.get();
         if long_time_since_send {
@@ -295,9 +295,9 @@ impl<RT: Runtime> SlowStartCongestionAvoidance<RT> for Cubic {
         }
     }
 
-    fn on_send(&self, sender: &Sender<RT>, num_bytes_sent: u32) {
+    fn on_send(&self, rto: Duration, num_bytes_sent: u32) {
         self.last_send_time.set(Instant::now());
-        self.rtt_at_last_send.set(sender.current_rto());
+        self.rtt_at_last_send.set(rto);
         self.limited_transmit_cwnd_increase.set_without_notify(
             self.limited_transmit_cwnd_increase
                 .get()
@@ -305,11 +305,17 @@ impl<RT: Runtime> SlowStartCongestionAvoidance<RT> for Cubic {
         );
     }
 
-    fn on_ack_received(&self, sender: &Sender<RT>, ack_seq_no: SeqNumber) {
-        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
+    fn on_ack_received(
+        &self,
+        rto: Duration,
+        base_seq_no: SeqNumber,
+        sent_seq_no: SeqNumber,
+        ack_seq_no: SeqNumber,
+    ) {
+        let bytes_acknowledged = ack_seq_no - base_seq_no;
         if bytes_acknowledged.0 == 0 {
             // ACK is a duplicate
-            self.on_dup_ack_received(sender, ack_seq_no);
+            self.on_dup_ack_received(sent_seq_no, ack_seq_no);
             // We attempt to keep track of the number of retransmitted packets in flight because we do not alter
             // ssthresh if a packet is lost when it has been retransmitted. There is almost certainly a better way.
             self.retransmitted_packets_in_flight
@@ -319,19 +325,19 @@ impl<RT: Runtime> SlowStartCongestionAvoidance<RT> for Cubic {
 
             if self.in_fast_recovery.get() {
                 // Fast Recovery response to new data
-                self.on_ack_received_fast_recovery(sender, ack_seq_no);
+                self.on_ack_received_fast_recovery(base_seq_no, sent_seq_no, ack_seq_no);
             } else {
-                self.on_ack_received_ss_ca(sender, ack_seq_no);
+                self.on_ack_received_ss_ca(rto, base_seq_no, ack_seq_no);
             }
             // Used to handle dup ACKs after timeout
             self.prev_ack_seq_no.set(ack_seq_no);
         }
     }
 
-    fn on_rto(&self, sender: &Sender<RT>) {
+    fn on_rto(&self, base_seq_no: SeqNumber) {
         // Handle timeout for any of the algorithms we could currently be using
         self.on_rto_ss_ca();
-        self.on_rto_fast_recovery(sender);
+        self.on_rto_fast_recovery(base_seq_no);
     }
 }
 
@@ -347,14 +353,14 @@ impl<RT: Runtime> FastRetransmitRecovery<RT> for Cubic {
         self.fast_retransmit_now.watch()
     }
 
-    fn on_fast_retransmit(&self, _sender: &Sender<RT>) {
+    fn on_fast_retransmit(&self) {
         // NOTE: Could we potentially miss FastRetransmit requests with just a flag?
         // I suspect it doesn't matter because we only retransmit on the 3rd repeat ACK precisely...
         // I should really use some other mechanism here just because it would be nicer...
         self.fast_retransmit_now.set_without_notify(false);
     }
 
-    fn on_base_seq_no_wraparound(&self, _sender: &Sender<RT>) {
+    fn on_base_seq_no_wraparound(&self) {
         // This still won't let us enter fast recovery if base_seq_no wraps to precisely 0, but there's nothing to be done in that case.
         self.recover.set(Wrapping(0));
     }

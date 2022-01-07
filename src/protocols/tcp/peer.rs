@@ -38,8 +38,14 @@ pub struct Peer<RT: Runtime> {
 
 impl<RT: Runtime> Peer<RT> {
     pub fn new(rt: RT, arp: arp::Peer<RT>, file_table: FileTable) -> Self {
-        let (tx, _rx) = mpsc::unbounded();
-        let inner = Rc::new(RefCell::new(Inner::new(rt.clone(), arp, file_table, tx)));
+        let (tx, rx) = mpsc::unbounded();
+        let inner = Rc::new(RefCell::new(Inner::new(
+            rt.clone(),
+            arp,
+            file_table,
+            tx,
+            rx,
+        )));
         Self { inner }
     }
 
@@ -126,11 +132,11 @@ impl<RT: Runtime> Peer<RT> {
         };
         let fd = inner.file_table.alloc(File::TcpSocket);
         let established = EstablishedSocket::new(cb, fd, inner.dead_socket_tx.clone());
-        let key = (established.cb.local, established.cb.remote);
+        let key = (established.cb.get_local(), established.cb.get_remote());
 
         let socket = Socket::Established {
-            local: established.cb.local,
-            remote: established.cb.remote,
+            local: established.cb.get_local(),
+            remote: established.cb.get_remote(),
         };
         assert!(inner.sockets.insert(fd, socket).is_none());
         assert!(inner.established.insert(key, established).is_none());
@@ -183,44 +189,6 @@ impl<RT: Runtime> Peer<RT> {
             fd,
             state,
             inner: self.inner.clone(),
-        }
-    }
-
-    pub fn peek(&self, fd: FileDescriptor) -> Result<RT::Buf, Fail> {
-        let inner = self.inner.borrow_mut();
-        let key = match inner.sockets.get(&fd) {
-            Some(Socket::Established { local, remote }) => (*local, *remote),
-            Some(..) => {
-                return Err(Fail::Malformed {
-                    details: "Socket not established",
-                })
-            }
-            None => return Err(Fail::Malformed { details: "Bad FD" }),
-        };
-        match inner.established.get(&key) {
-            Some(ref s) => s.peek(),
-            None => Err(Fail::Malformed {
-                details: "Socket not established",
-            }),
-        }
-    }
-
-    pub fn recv(&self, fd: FileDescriptor) -> Result<Option<RT::Buf>, Fail> {
-        let inner = self.inner.borrow_mut();
-        let key = match inner.sockets.get(&fd) {
-            Some(Socket::Established { local, remote }) => (*local, *remote),
-            Some(..) => {
-                return Err(Fail::Malformed {
-                    details: "Recv: Socket not established",
-                })
-            }
-            None => return Err(Fail::Malformed { details: "Bad FD" }),
-        };
-        match inner.established.get(&key) {
-            Some(ref s) => s.recv(),
-            None => Err(Fail::Malformed {
-                details: "Socket not established",
-            }),
         }
     }
 
@@ -414,6 +382,7 @@ impl<RT: Runtime> Inner<RT> {
         arp: arp::Peer<RT>,
         file_table: FileTable,
         dead_socket_tx: mpsc::UnboundedSender<FileDescriptor>,
+        _dead_socket_rx: mpsc::UnboundedReceiver<FileDescriptor>,
     ) -> Self {
         Self {
             isn_generator: IsnGenerator::new(rt.rng_gen()),
@@ -431,7 +400,7 @@ impl<RT: Runtime> Inner<RT> {
 
     fn receive(&mut self, ip_hdr: &Ipv4Header, buf: RT::Buf) -> Result<(), Fail> {
         let tcp_options = self.rt.tcp_options();
-        let (tcp_hdr, data) = TcpHeader::parse(ip_hdr, buf, tcp_options.rx_checksum_offload)?;
+        let (tcp_hdr, data) = TcpHeader::parse(ip_hdr, buf, tcp_options.rx_checksum_offload())?;
         debug!("TCP received {:?}", tcp_hdr);
         let local = ipv4::Endpoint::new(ip_hdr.dst_addr, tcp_hdr.dst_port);
         let remote = ipv4::Endpoint::new(ip_hdr.src_addr, tcp_hdr.src_port);
@@ -487,7 +456,7 @@ impl<RT: Runtime> Inner<RT> {
             ipv4_hdr: Ipv4Header::new(local.addr, remote.addr, Ipv4Protocol2::Tcp),
             tcp_hdr,
             data: RT::Buf::empty(),
-            tx_checksum_offload: self.rt.tcp_options().tx_checksum_offload,
+            tx_checksum_offload: self.rt.tcp_options().tx_checksum_offload(),
         };
         self.rt.transmit(segment);
 

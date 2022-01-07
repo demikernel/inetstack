@@ -2,9 +2,15 @@
 // Licensed under the MIT license.
 
 mod background;
-pub mod state;
+mod ctrlblk;
+mod receiver;
+mod sender;
 
-use self::{background::background, state::ControlBlock};
+pub use self::ctrlblk::ControlBlock;
+pub use self::ctrlblk::State;
+pub use self::sender::congestion_ctrl as cc;
+
+use self::background::background;
 use crate::{
     fail::Fail,
     file_table::FileDescriptor,
@@ -33,7 +39,7 @@ impl<RT: Runtime> EstablishedSocket<RT> {
     ) -> Self {
         let cb = Rc::new(cb);
         let future = background(cb.clone(), fd, dead_socket_tx);
-        let handle = cb.rt.spawn(future);
+        let handle = cb.rt().spawn(future);
         Self {
             cb: cb.clone(),
             background_work: handle,
@@ -45,19 +51,11 @@ impl<RT: Runtime> EstablishedSocket<RT> {
     }
 
     pub fn send(&self, buf: RT::Buf) -> Result<(), Fail> {
-        self.cb.sender.send(buf, &self.cb)
-    }
-
-    pub fn peek(&self) -> Result<RT::Buf, Fail> {
-        self.cb.receiver.peek()
-    }
-
-    pub fn recv(&self) -> Result<Option<RT::Buf>, Fail> {
-        self.cb.receiver.recv()
+        self.cb.send(buf)
     }
 
     pub fn poll_recv(&self, ctx: &mut Context) -> Poll<Result<RT::Buf, Fail>> {
-        self.cb.receiver.poll_recv(ctx)
+        self.cb.poll_recv(ctx)
     }
 
     pub fn close(&self) -> Result<(), Fail> {
@@ -73,6 +71,6 @@ impl<RT: Runtime> EstablishedSocket<RT> {
     }
 
     pub fn endpoints(&self) -> (ipv4::Endpoint, ipv4::Endpoint) {
-        (self.cb.local, self.cb.remote)
+        (self.cb.get_local(), self.cb.get_remote())
     }
 }

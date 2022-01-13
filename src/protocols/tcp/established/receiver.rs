@@ -184,10 +184,15 @@ impl<RT: Runtime> Receiver<RT> {
                 }
                 // Add the new segment to the out-of-order store.
                 out_of_order.insert(seq_no, buf);
+                // ToDo: There is a bug here.  We should send an ACK if we drop the segment.
                 return Err(Fail::Ignored {
                     details: "Out of order segment (reordered)",
                 });
             }
+
+            // ToDo: There is a bug here.  By falling through here (which happens when the new data segment is already
+            // in the out-of-order store), we end up accepting the new data segment as a valid in-order segment.  Which
+            // it isn't.  We should be dropping the segment as a duplicate.  And of course, sending an ACK.
         }
 
         // Check if we've already received this data (i.e. new segment contains duplicate data).

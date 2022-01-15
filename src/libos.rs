@@ -406,18 +406,43 @@ impl<RT: Runtime> LibOS<RT> {
     /// Then ask the runtime to receive new data which we will forward to the engine to parse and
     /// route to the correct protocol.
     fn poll_bg_work(&mut self) {
-        self.rt.scheduler().poll();
-        for _ in 0..MAX_RECV_ITERS {
-            let batch = self.rt.receive();
-            if batch.is_empty() {
-                break;
-            }
-            for pkt in batch {
-                if let Err(e) = self.engine.receive(pkt) {
-                    warn!("Dropped packet: {:?}", e);
+        #[cfg(feature = "profiler")]
+        timer!("catnip::poll_bg_work");
+        {
+            #[cfg(feature = "profiler")]
+            timer!("catnip::poll_bg_work::poll");
+            self.rt.scheduler().poll();
+        }
+
+        {
+            #[cfg(feature = "profiler")]
+            timer!("catnip::poll_bg_work::for");
+
+            for _ in 0..MAX_RECV_ITERS {
+                let batch = {
+                    #[cfg(feature = "profiler")]
+                    timer!("catnip::poll_bg_work::for::receive");
+
+                    self.rt.receive()
+                };
+
+                {
+                    #[cfg(feature = "profiler")]
+                    timer!("catnip::poll_bg_work::for::for");
+
+                    if batch.is_empty() {
+                        break;
+                    }
+
+                    for pkt in batch {
+                        if let Err(e) = self.engine.receive(pkt) {
+                            warn!("Dropped packet: {:?}", e);
+                        }
+                    }
                 }
             }
         }
+
         if self.ts_iters == 0 {
             self.rt.advance_clock(Instant::now());
         }

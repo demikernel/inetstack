@@ -6,9 +6,32 @@ name: Test
 on:
   push:
     branches:
+      - bugfix-*
+      - enhancement-*
+      - feature-*
       - dev
       - unstable
       - master
+  pull_request:
+    branches:
+      - bugfix-*
+      - enhancement-*
+      - feature-*
+      - workaround-*
+      - dev
+      - unstable
+      - master
+  workflow_dispatch:
+    branches:
+      - bugfix-*
+      - enhancement-*
+      - feature-*
+      - workaround-*
+      - dev
+      - unstable
+      - master
+
+concurrency: azure
 
 env:
   CARGO_TERM_COLOR: always

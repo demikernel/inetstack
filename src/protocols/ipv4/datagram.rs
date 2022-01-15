@@ -12,7 +12,7 @@ use std::{
 pub const IPV4_HEADER_SIZE: usize = 20;
 
 // todo: need citation
-pub const DEFAULT_IPV4_TTL: u8 = 64;
+pub const DEFAULT_IPV4_TTL: u8 = 255;
 pub const IPV4_IHL_NO_OPTIONS: u8 = 5;
 pub const IPV4_VERSION: u8 = 4;
 
@@ -37,7 +37,7 @@ impl TryFrom<u8> for Ipv4Protocol2 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct Ipv4Header {
     // [ version 4 bits ] [ IHL 4 bits ]
     // The user shouldn't be able to mutate the version, so we parse it out but don't include it
@@ -91,7 +91,7 @@ impl Ipv4Header {
             identification: 0,
             flags: 0,
             fragment_offset: 0,
-            time_to_live: 0,
+            time_to_live: DEFAULT_IPV4_TTL,
             protocol,
             src_addr,
             dst_addr,

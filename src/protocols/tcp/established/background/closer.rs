@@ -56,8 +56,8 @@ async fn active_ack_fin<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail
         }
 
         // Wait for all data to be acknowledged.
-        let (ack_seq, ack_seq_changed) = cb.get_last_ack_no();
-        let (recv_seq, _) = cb.get_last_recv_seq_no();
+        let (ack_seq, ack_seq_changed) = cb.get_ack_seq_no();
+        let (recv_seq, _) = cb.get_recv_seq_no();
         if ack_seq != recv_seq {
             ack_seq_changed.await;
             continue;
@@ -111,8 +111,8 @@ async fn passive_close<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail>
         }
 
         // Wait for all data to be acknowledged.
-        let (ack_seq, ack_seq_changed) = cb.get_last_ack_no();
-        let (recv_seq, _) = cb.get_last_recv_seq_no();
+        let (ack_seq, ack_seq_changed) = cb.get_ack_seq_no();
+        let (recv_seq, _) = cb.get_recv_seq_no();
         if ack_seq != recv_seq {
             ack_seq_changed.await;
             continue;

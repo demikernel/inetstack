@@ -112,7 +112,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let segment_data_len = segment_data.len() as u32;
         assert!(segment_data_len > 0);
 
-        let rto: Duration = cb.current_rto();
+        let rto: Duration = cb.rto_current();
         cb.congestion_ctrl_on_send(rto, sent_data);
 
         let mut header = cb.tcp_header();

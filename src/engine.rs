@@ -18,6 +18,9 @@ use crate::{
 };
 use std::{future::Future, net::Ipv4Addr, time::Duration};
 
+#[cfg(feature = "profiler")]
+use perftools::timer;
+
 #[cfg(test)]
 use crate::protocols::ethernet2::MacAddress;
 #[cfg(test)]
@@ -53,6 +56,8 @@ impl<RT: Runtime> Engine<RT> {
     /// allow the correct protocol to handle it. The underlying protocol will futher parse the data
     /// and inform the correct task that its data has arrived.
     pub fn receive(&mut self, bytes: RT::Buf) -> Result<(), Fail> {
+        #[cfg(feature = "profiler")]
+        timer!("catnip::engine::receive");
         let (header, payload) = Ethernet2Header::parse(bytes)?;
         debug!("Engine received {:?}", header);
         if self.rt.local_link_addr() != header.dst_addr && !header.dst_addr.is_broadcast() {

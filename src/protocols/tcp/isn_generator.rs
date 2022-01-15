@@ -23,7 +23,7 @@ impl IsnGenerator {
 
     #[cfg(test)]
     pub fn generate(&mut self, _local: &ipv4::Endpoint, _remote: &ipv4::Endpoint) -> SeqNumber {
-        Wrapping(0)
+        SeqNumber.from(0);
     }
 
     #[cfg(not(test))]
@@ -35,7 +35,7 @@ impl IsnGenerator {
         hash.write_u16(local.port().into());
         hash.write_u32(self.nonce);
         let hash = hash.sum32();
-        let isn = Wrapping(hash) + Wrapping(u32::from(self.counter.0));
+        let isn = SeqNumber::from(hash + self.counter.0 as u32);
         self.counter += Wrapping(1);
         isn
     }

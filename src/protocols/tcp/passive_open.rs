@@ -24,7 +24,6 @@ use std::{
     collections::VecDeque,
     convert::TryInto,
     future::Future,
-    num::Wrapping,
     rc::Rc,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -144,7 +143,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
                 mss,
                 ..
             } = self.inflight.get(&remote).unwrap();
-            if header.ack_num != local_isn + Wrapping(1) {
+            if header.ack_num != local_isn + SeqNumber::from(1) {
                 return Err(Fail::Malformed {
                     details: "Invalid SYN+ACK seq num",
                 });
@@ -178,11 +177,11 @@ impl<RT: Runtime> PassiveSocket<RT> {
                 remote,
                 self.rt.clone(),
                 self.arp.clone(),
-                remote_isn + Wrapping(1),
+                remote_isn + SeqNumber::from(1),
                 self.rt.tcp_options().ack_delay_timeout(),
                 local_window_size,
                 local_window_scale,
-                local_isn + Wrapping(1),
+                local_isn + SeqNumber::from(1),
                 remote_window_size,
                 remote_window_scale,
                 mss,
@@ -270,7 +269,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
                 tcp_hdr.syn = true;
                 tcp_hdr.seq_num = local_isn;
                 tcp_hdr.ack = true;
-                tcp_hdr.ack_num = remote_isn + Wrapping(1);
+                tcp_hdr.ack_num = remote_isn + SeqNumber::from(1);
                 tcp_hdr.window_size = tcp_options.receive_window_size();
 
                 let mss = tcp_options.advertised_mss() as u16;

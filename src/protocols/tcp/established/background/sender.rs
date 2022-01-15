@@ -2,9 +2,10 @@
 // Licensed under the MIT license.
 
 use super::super::{ctrlblk::ControlBlock, sender::UnackedSegment};
+use super::super::super::{SeqNumber};
 use crate::{fail::Fail, runtime::Runtime};
 use futures::FutureExt;
-use std::{cmp, num::Wrapping, rc::Rc, time::Duration};
+use std::{cmp, rc::Rc, time::Duration};
 
 pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
     'top: loop {
@@ -36,7 +37,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
                 .pop_one_unsent_byte()
                 .unwrap_or_else(|| panic!("No unsent data? {}, {}", sent_seq, unsent_seq));
 
-            cb.modify_sent_seq_no(|s| s + Wrapping(1));
+            cb.modify_sent_seq_no(|s| s + SeqNumber::from(1));
             let unacked_segment = UnackedSegment {
                 bytes: buf.clone(),
                 initial_tx: Some(cb.rt().now()),
@@ -80,7 +81,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let effective_cwnd = cwnd + ltci;
         let next_buf_size = cb.unsent_top_size().expect("no buffer in unsent queue");
 
-        let Wrapping(sent_data) = sent_seq - base_seq;
+        let sent_data = (sent_seq - base_seq).into();
         if win_sz <= (sent_data + next_buf_size as u32)
             || effective_cwnd <= sent_data
             || (effective_cwnd - sent_data) <= cb.get_mss() as u32
@@ -108,7 +109,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let segment_data = cb
             .pop_unsent_segment(max_size)
             .expect("No unsent data with sequence number gap?");
-        let segment_data_len = segment_data.len();
+        let segment_data_len = segment_data.len() as u32;
         assert!(segment_data_len > 0);
 
         let rto: Duration = cb.current_rto();
@@ -118,7 +119,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         header.seq_num = sent_seq;
         cb.emit(header, segment_data.clone(), remote_link_addr);
 
-        cb.modify_sent_seq_no(|s| s + Wrapping(segment_data_len as u32));
+        cb.modify_sent_seq_no(|s| s + SeqNumber::from(segment_data_len));
         let unacked_segment = UnackedSegment {
             bytes: segment_data,
             initial_tx: Some(cb.rt().now()),

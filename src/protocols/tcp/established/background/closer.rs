@@ -6,10 +6,11 @@
 use super::{ControlBlock, State};
 use crate::{
     fail::Fail,
+    protocols::tcp::SeqNumber,
     runtime::{Runtime, RuntimeBuf},
 };
 use futures::FutureExt;
-use std::{num::Wrapping, rc::Rc};
+use std::{rc::Rc};
 
 //==============================================================================
 
@@ -69,7 +70,7 @@ async fn active_ack_fin<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail
         // ACK replies to FIN are special as their ack sequence number should be set to +1 the
         // received seq number even though there is no payload.
         header.ack = true;
-        header.ack_num = recv_seq + Wrapping(1);
+        header.ack_num = recv_seq + SeqNumber::from(1);
         cb.emit(header, RT::Buf::empty(), remote_link_addr);
 
         if st == State::Closing1 {
@@ -121,7 +122,7 @@ async fn passive_close<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail>
         let remote_link_addr = cb.arp().query(cb.get_remote().address()).await?;
         let mut header = cb.tcp_header();
         header.ack = true;
-        header.ack_num = recv_seq + Wrapping(1);
+        header.ack_num = recv_seq + SeqNumber::from(1);
         cb.emit(header, RT::Buf::empty(), remote_link_addr);
 
         cb.set_state(State::CloseWait1);

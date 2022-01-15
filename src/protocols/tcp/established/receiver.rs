@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     convert::TryInto,
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
@@ -67,7 +67,8 @@ pub struct Receiver<RT: Runtime> {
     window_scale: u32,
 
     waker: RefCell<Option<Waker>>,
-    out_of_order: RefCell<BTreeMap<SeqNumber, RT::Buf>>,
+    //out_of_order: RefCell<BTreeMap<SeqNumber, RT::Buf>>,
+    out_of_order: RefCell<VecDeque<(SeqNumber, RT::Buf)>>,
 }
 
 impl<RT: Runtime> Receiver<RT> {
@@ -87,7 +88,8 @@ impl<RT: Runtime> Receiver<RT> {
             max_window_size,
             window_scale,
             waker: RefCell::new(None),
-            out_of_order: RefCell::new(BTreeMap::new()),
+            //out_of_order: RefCell::new(BTreeMap::new()),
+            out_of_order: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -172,27 +174,45 @@ impl<RT: Runtime> Receiver<RT> {
     pub fn receive_data(&self, seq_no: SeqNumber, buf: RT::Buf, now: Instant) -> Result<(), Fail> {
         let recv_seq_no = self.recv_seq_no.get();
 
-        // Check if new data comes after what we're expecting (i.e. new segment arrived out-of-order).
         if seq_no > recv_seq_no {
+            // This new segment comes after what we're expecting (i.e. the new segment arrived out-of-order).
             let mut out_of_order = self.out_of_order.borrow_mut();
+
             // Check if the new data segment's starting sequence number is already in the out-of-order store.
-            if !out_of_order.contains_key(&seq_no) {
-                // But first, if the out-of-order store contains too many entries, delete later entries until it's ok.
-                while out_of_order.len() > MAX_OUT_OF_ORDER {
-                    let (&key, _) = out_of_order.iter().rev().next().unwrap();
-                    out_of_order.remove(&key);
+            // ToDo: We should check if any part of the new segment contains new data, and not just the start.
+            for stored_segment in out_of_order.iter() {
+                if stored_segment.0 == seq_no {
+                    // Drop this segment as a duplicate.
+                    // ToDo: We should ACK when we drop a segment.
+                    return Err(Fail::Ignored {
+                        details: "Out of order segment (duplicate)",
+                    });
                 }
-                // Add the new segment to the out-of-order store.
-                out_of_order.insert(seq_no, buf);
-                // ToDo: There is a bug here.  We should send an ACK if we drop the segment.
-                return Err(Fail::Ignored {
-                    details: "Out of order segment (reordered)",
-                });
             }
 
-            // ToDo: There is a bug here.  By falling through here (which happens when the new data segment is already
-            // in the out-of-order store), we end up accepting the new data segment as a valid in-order segment.  Which
-            // it isn't.  We should be dropping the segment as a duplicate.  And of course, sending an ACK.
+            // Before adding more, if the out-of-order store contains too many entries, delete the later entries.
+            while out_of_order.len() > MAX_OUT_OF_ORDER {
+                out_of_order.pop_back();
+            }
+
+            // Add the new segment to the out-of-order store (the store is sorted by starting sequence number).
+            let mut insert_index = out_of_order.len();
+            for index in 0..out_of_order.len() {
+                if seq_no > out_of_order[index].0 {
+                    insert_index = index;
+                    break;
+                }
+            }
+            if insert_index < out_of_order.len() {
+                out_of_order[insert_index] = (seq_no, buf);
+            } else {
+                out_of_order.push_back((seq_no, buf));
+            }
+
+            // ToDo: There is a bug here.  We should send an ACK when we drop a segment.
+            return Err(Fail::Ignored {
+                details: "Out of order segment (reordered)",
+            });
         }
 
         // Check if we've already received this data (i.e. new segment contains duplicate data).
@@ -230,11 +250,31 @@ impl<RT: Runtime> Receiver<RT> {
             });
         }
 
-        // Update our receive sequence number (i.e. RCV_NXT) appropriately.
-        self.recv_seq_no.modify(|r| r + SeqNumber::from(buf.len() as u32));
-
         // Push the new segment data onto the end of the receive queue.
+        let mut recv_seq_no = recv_seq_no + SeqNumber::from(buf.len() as u32);
         self.recv_queue.borrow_mut().push_back(buf);
+
+        // Okay, we've successfully received some new data.  Check if any of the formerly out-of-order data waiting in
+        // the out-of-order queue is now in-order.  If so, we can move it to the receive queue.
+        let mut out_of_order = self.out_of_order.borrow_mut();
+        while !out_of_order.is_empty() {
+            if let Some(stored_entry) = out_of_order.front() {
+                if stored_entry.0 == recv_seq_no {
+                    // Move this entry's buffer from the out-of-order store to the receive queue.
+                    // This data is now considered to be "received" by TCP, and included in our RCV.NXT calculation.
+                    if let Some(temp) = out_of_order.pop_front() {
+                        recv_seq_no = recv_seq_no + SeqNumber::from(temp.1.len() as u32);
+                        self.recv_queue.borrow_mut().push_back(temp.1);
+                    }
+                } else {
+                    // Since our out-of-order list is sorted, we can stop when the next segment is not in sequence.
+                    break;
+                }
+            }
+        }
+
+        // Update our receive sequence number (i.e. RCV_NXT) appropriately.
+        self.recv_seq_no.set(recv_seq_no);
 
         // This appears to be checking if something is waiting on this Receiver, and if so, wakes that thing up.
         // ToDo: Verify that this is the right place and time to do this.
@@ -251,24 +291,6 @@ impl<RT: Runtime> Receiver<RT> {
         // ToDo: Another bug.  If the delayed ACK timer is already running, we should cancel it and ACK immediately.
         if self.ack_deadline.get().is_none() {
             self.ack_deadline.set(Some(now + self.ack_delay_timeout));
-        }
-
-        // Okay, we've successfully received some new data.  Check if any of the formerly out-of-order data waiting in
-        // the out-of-order queue is now in-order.  If so, we can move it to the receive queue.
-        let new_recv_seq_no = self.recv_seq_no.get();
-        let old_data = {
-            let mut out_of_order = self.out_of_order.borrow_mut();
-            out_of_order.remove(&new_recv_seq_no)
-        };
-        // ToDo: There is a bug or two here.  First off, this recursively pulls data off of the out-of-order queue,
-        // which could blow the stack if MAX_OUT_OF_ORDER is large.  Secondly, we should be doing this check for
-        // out-of-order data thing up above, immediately after we add the new data to our receive queue and before we
-        // send the ACK or wake any app-level readers.
-        if let Some(old_data) = old_data {
-            info!("Recovering out-of-order packet at {}", new_recv_seq_no);
-            if let Err(e) = self.receive_data(new_recv_seq_no, old_data, now) {
-                info!("Failed to recover out-of-order packet: {:?}", e);
-            }
         }
 
         Ok(())

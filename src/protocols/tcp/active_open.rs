@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use super::{constants::FALLBACK_MSS, established::ControlBlock};
+use super::{constants::FALLBACK_MSS, established::ControlBlock, SeqNumber};
 use crate::{
     fail::Fail,
     protocols::{
@@ -11,7 +11,6 @@ use crate::{
         ipv4::datagram::{Ipv4Header, Ipv4Protocol2},
         tcp::{
             segment::{TcpHeader, TcpOptions2, TcpSegment},
-            SeqNumber,
         },
     },
     runtime::{Runtime, RuntimeBuf},
@@ -21,7 +20,6 @@ use std::{
     cell::RefCell,
     convert::TryInto,
     future::Future,
-    num::Wrapping,
     rc::Rc,
     task::{Context, Poll, Waker},
 };
@@ -102,7 +100,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
     }
 
     pub fn receive(&mut self, header: &TcpHeader) {
-        let expected_seq = self.local_isn + Wrapping(1);
+        let expected_seq = self.local_isn + SeqNumber::from(1);
 
         // Bail if we didn't receive a ACK packet with the right sequence number.
         if !(header.ack && header.ack_num == expected_seq) {
@@ -127,7 +125,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
             Some(r) => r,
             None => panic!("TODO: Clean up ARP query control flow"),
         };
-        let remote_seq_num = header.seq_num + Wrapping(1);
+        let remote_seq_num = header.seq_num + SeqNumber::from(1);
 
         let tcp_options = self.rt.tcp_options();
 
@@ -135,7 +133,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         tcp_hdr.ack = true;
         tcp_hdr.ack_num = remote_seq_num;
         tcp_hdr.window_size = tcp_options.receive_window_size();
-        tcp_hdr.seq_num = self.local_isn + Wrapping(1);
+        tcp_hdr.seq_num = self.local_isn + SeqNumber::from(1);
         debug!("Sending ACK: {:?}", tcp_hdr);
 
         let segment = TcpSegment {

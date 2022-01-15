@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+// ToDo: Add better explanatory comment.
+// This (i.e. "cubic") appears to be an implementation of RFC 8312.  Note this is an informational RFC, not a standards
+// track document.  RFC 8312 documents the non-standard congestion control algorithm used in Linux.  It appears to
+// differ from the standard congestion control algorithm only on the sender side.  In particular, it uses a cubic
+// function instead of a linear window increase function.
+// ToDo: Review if we really care to support this.
+
 use super::{
     CongestionControl, FastRetransmitRecovery, LimitedTransmit, Options,
     SlowStartCongestionAvoidance,
@@ -15,7 +22,6 @@ use std::{
     cmp::{max, min},
     convert::TryInto,
     fmt::Debug,
-    num::Wrapping,
     time::{Duration, Instant},
 };
 
@@ -116,21 +122,16 @@ impl Cubic {
         duplicate_ack_count
     }
 
-    fn on_dup_ack_received(&self, sent_seq_no: Wrapping<u32>, ack_seq_no: SeqNumber) {
+    fn on_dup_ack_received(&self, sent_seq_no: SeqNumber, ack_seq_no: SeqNumber) {
         // Get and increment the duplicate ACK count, and store the updated value
         let duplicate_ack_count = self.increment_dup_ack_count();
 
         let prev_ack_seq_no = self.prev_ack_seq_no.get();
-        let ack_seq_no_diff = if ack_seq_no > prev_ack_seq_no {
-            (ack_seq_no - prev_ack_seq_no).0
-        } else {
-            // Handle the case where the current ack_seq_no has wrapped and the previous hasn't
-            (prev_ack_seq_no - ack_seq_no).0
-        };
+        let ack_seq_no_diff: u32 = (ack_seq_no - prev_ack_seq_no).into();
         let cwnd = self.cwnd.get();
-        let ack_covers_recover = ack_seq_no - Wrapping(1) > self.recover.get();
+        let ack_covers_recover = ack_seq_no - SeqNumber::from(1) > self.recover.get();
         let retransmitted_packet_dropped_heuristic =
-            cwnd > self.mss && ack_seq_no_diff as u32 <= 4 * self.mss;
+            cwnd > self.mss && ack_seq_no_diff <= 4 * self.mss;
 
         if duplicate_ack_count == Self::DUP_ACK_THRESHOLD
             && (ack_covers_recover || retransmitted_packet_dropped_heuristic)
@@ -161,15 +162,15 @@ impl Cubic {
         sent_seq_no: SeqNumber,
         ack_seq_no: SeqNumber,
     ) {
-        let bytes_outstanding = sent_seq_no - base_seq_no;
-        let bytes_acknowledged = ack_seq_no - base_seq_no;
+        let bytes_outstanding: u32 = (sent_seq_no - base_seq_no).into();
+        let bytes_acknowledged: u32 = (ack_seq_no - base_seq_no).into();
         let mss = self.mss;
 
         if ack_seq_no > self.recover.get() {
             // Full acknowledgement
             self.cwnd.set(min(
                 self.ssthresh.get(),
-                max(bytes_outstanding.0, mss) + mss,
+                max(bytes_outstanding, mss) + mss,
             ));
             // Record the time we go back into congestion avoidance
             self.ca_start.set(Instant::now());
@@ -179,10 +180,10 @@ impl Cubic {
         } else {
             // Partial acknowledgement
             self.fast_retransmit_now.set(true);
-            if bytes_acknowledged.0 >= mss {
-                self.cwnd.modify(|c| c - bytes_acknowledged.0 + mss);
+            if bytes_acknowledged >= mss {
+                self.cwnd.modify(|c| c - bytes_acknowledged + mss);
             } else {
-                self.cwnd.modify(|c| c - bytes_acknowledged.0);
+                self.cwnd.modify(|c| c - bytes_acknowledged);
             }
             // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
             // Thus, we don't reset ca_start here either.
@@ -213,14 +214,14 @@ impl Cubic {
     }
 
     fn on_ack_received_ss_ca(&self, rto: Duration, base_seq_no: SeqNumber, ack_seq_no: SeqNumber) {
-        let bytes_acknowledged = ack_seq_no - base_seq_no;
+        let bytes_acknowledged: u32 = (ack_seq_no - base_seq_no).into();
         let mss = self.mss;
         let cwnd = self.cwnd.get();
         let ssthresh = self.ssthresh.get();
 
         if cwnd < ssthresh {
             // Slow start
-            self.cwnd.modify(|c| c + min(bytes_acknowledged.0, mss));
+            self.cwnd.modify(|c| c + min(bytes_acknowledged, mss));
         } else {
             // Congestion avoidance
             let t = self.ca_start.get().elapsed().as_secs_f32();
@@ -312,8 +313,8 @@ impl<RT: Runtime> SlowStartCongestionAvoidance<RT> for Cubic {
         sent_seq_no: SeqNumber,
         ack_seq_no: SeqNumber,
     ) {
-        let bytes_acknowledged = ack_seq_no - base_seq_no;
-        if bytes_acknowledged.0 == 0 {
+        let bytes_acknowledged: u32 = (ack_seq_no - base_seq_no).into();
+        if bytes_acknowledged == 0 {
             // ACK is a duplicate
             self.on_dup_ack_received(sent_seq_no, ack_seq_no);
             // We attempt to keep track of the number of retransmitted packets in flight because we do not alter
@@ -362,7 +363,8 @@ impl<RT: Runtime> FastRetransmitRecovery<RT> for Cubic {
 
     fn on_base_seq_no_wraparound(&self) {
         // This still won't let us enter fast recovery if base_seq_no wraps to precisely 0, but there's nothing to be done in that case.
-        self.recover.set(Wrapping(0));
+        // ToDo: Review this.  Now that we have real sequence numbers, we probably don't need this function anymore.
+        self.recover.set(SeqNumber::from(0));
     }
 }
 

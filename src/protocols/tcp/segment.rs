@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+
 use crate::{
     fail::Fail,
     protocols::{
@@ -15,7 +16,6 @@ use byteorder::{ByteOrder, NetworkEndian, ReadBytesExt};
 use std::{
     convert::{TryFrom, TryInto},
     io::Cursor,
-    num::Wrapping,
 };
 
 pub const MIN_TCP_HEADER_SIZE: usize = 20;
@@ -137,11 +137,11 @@ impl TcpOptions2 {
                 for i in 0..*num_sacks {
                     NetworkEndian::write_u32(
                         &mut buf[(2 + 8 * i)..(2 + 8 * i + 4)],
-                        sacks[i].begin.0,
+                        sacks[i].begin.into(),
                     );
                     NetworkEndian::write_u32(
                         &mut buf[(2 + 8 * i + 4)..(2 + 8 * i + 8)],
-                        sacks[i].end.0,
+                        sacks[i].end.into(),
                     );
                 }
                 2 + 8 * num_sacks
@@ -197,8 +197,8 @@ impl TcpHeader {
         Self {
             src_port,
             dst_port,
-            seq_num: Wrapping(0),
-            ack_num: Wrapping(0),
+            seq_num: SeqNumber::from(0),
+            ack_num: SeqNumber::from(0),
 
             ns: false,
             cwr: false,
@@ -248,8 +248,8 @@ impl TcpHeader {
         let src_port = ip::Port::try_from(NetworkEndian::read_u16(&hdr_buf[0..2]))?;
         let dst_port = ip::Port::try_from(NetworkEndian::read_u16(&hdr_buf[2..4]))?;
 
-        let seq_num = Wrapping(NetworkEndian::read_u32(&hdr_buf[4..8]));
-        let ack_num = Wrapping(NetworkEndian::read_u32(&hdr_buf[8..12]));
+        let seq_num = SeqNumber::from(NetworkEndian::read_u32(&hdr_buf[4..8]));
+        let ack_num = SeqNumber::from(NetworkEndian::read_u32(&hdr_buf[8..12]));
 
         let ns = (hdr_buf[12] & 1) != 0;
 
@@ -325,12 +325,12 @@ impl TcpHeader {
                             }
                         };
                         let mut sacks = [SelectiveAcknowlegement {
-                            begin: Wrapping(0),
-                            end: Wrapping(0),
+                            begin: SeqNumber::from(0),
+                            end: SeqNumber::from(0),
                         }; 4];
                         for s in sacks.iter_mut().take(num_sacks) {
-                            s.begin = Wrapping(option_rdr.read_u32::<NetworkEndian>()?);
-                            s.end = Wrapping(option_rdr.read_u32::<NetworkEndian>()?);
+                            s.begin = SeqNumber::from(option_rdr.read_u32::<NetworkEndian>()?);
+                            s.end = SeqNumber::from(option_rdr.read_u32::<NetworkEndian>()?);
                         }
                         TcpOptions2::SelectiveAcknowlegement { num_sacks, sacks }
                     }
@@ -399,8 +399,8 @@ impl TcpHeader {
             (&mut buf[..MIN_TCP_HEADER_SIZE]).try_into().unwrap();
         NetworkEndian::write_u16(&mut fixed_buf[0..2], self.src_port.into());
         NetworkEndian::write_u16(&mut fixed_buf[2..4], self.dst_port.into());
-        NetworkEndian::write_u32(&mut fixed_buf[4..8], self.seq_num.0);
-        NetworkEndian::write_u32(&mut fixed_buf[8..12], self.ack_num.0);
+        NetworkEndian::write_u32(&mut fixed_buf[4..8], self.seq_num.into());
+        NetworkEndian::write_u32(&mut fixed_buf[8..12], self.ack_num.into());
 
         fixed_buf[12] = ((self.compute_size() / 4) as u8) << 4;
         if self.ns {
@@ -462,6 +462,7 @@ impl TcpHeader {
         }
     }
 
+    // ToDo: Review the use of usize here (and everywhere in catnip, really).
     pub fn compute_size(&self) -> usize {
         let mut size = MIN_TCP_HEADER_SIZE;
         for i in 0..self.num_options {
@@ -473,6 +474,7 @@ impl TcpHeader {
         }
 
         // Round up to the next multiple of 4 so the TCP data is always 32 bit aligned.
+        // ToDo: Review why wrapping_add is used here.
         size.wrapping_add(3) & !0x3
     }
 

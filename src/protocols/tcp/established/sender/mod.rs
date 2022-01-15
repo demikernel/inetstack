@@ -19,7 +19,6 @@ use std::{
     collections::VecDeque,
     convert::TryInto,
     fmt,
-    num::Wrapping,
     time::{Duration, Instant},
 };
 
@@ -110,19 +109,19 @@ impl<RT: Runtime> Sender<RT> {
         self.window_size.watch()
     }
 
-    pub fn get_base_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_base_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.base_seq_no.watch()
     }
 
-    pub fn get_sent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_sent_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.sent_seq_no.watch()
     }
 
-    pub fn modify_sent_seq_no(&self, f: impl FnOnce(Wrapping<u32>) -> Wrapping<u32>) {
+    pub fn modify_sent_seq_no(&self, f: impl FnOnce(SeqNumber) -> SeqNumber) {
         self.sent_seq_no.modify(f)
     }
 
-    pub fn get_unsent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_unsent_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.unsent_seq_no.watch()
     }
 
@@ -158,7 +157,7 @@ impl<RT: Runtime> Sender<RT> {
         let win_sz = self.window_size.get();
         let base_seq = self.base_seq_no.get();
         let sent_seq = self.sent_seq_no.get();
-        let Wrapping(sent_data) = sent_seq - base_seq;
+        let sent_data:u32 = (sent_seq - base_seq).into();
 
         // Fast path: Try to send the data immediately.
         let in_flight_after_send = sent_data + buf_len;
@@ -184,8 +183,8 @@ impl<RT: Runtime> Sender<RT> {
                     header.seq_num = sent_seq;
                     cb.emit(header, buf.clone(), remote_link_addr);
 
-                    self.unsent_seq_no.modify(|s| s + Wrapping(buf_len));
-                    self.sent_seq_no.modify(|s| s + Wrapping(buf_len));
+                    self.unsent_seq_no.modify(|s| s + SeqNumber::from(buf_len));
+                    self.sent_seq_no.modify(|s| s + SeqNumber::from(buf_len));
                     let unacked_segment = UnackedSegment {
                         bytes: buf,
                         initial_tx: Some(cb.rt().now()),
@@ -209,7 +208,7 @@ impl<RT: Runtime> Sender<RT> {
 
         // Slow path: Delegating sending the data to background processing.
         self.unsent_queue.borrow_mut().push_back(buf);
-        self.unsent_seq_no.modify(|s| s + Wrapping(buf_len));
+        self.unsent_seq_no.modify(|s| s + SeqNumber::from(buf_len));
 
         Ok(())
     }
@@ -218,8 +217,8 @@ impl<RT: Runtime> Sender<RT> {
         let base_seq_no = self.base_seq_no.get();
         let sent_seq_no = self.sent_seq_no.get();
 
-        let bytes_outstanding = sent_seq_no - base_seq_no;
-        let bytes_acknowledged = ack_seq_no - base_seq_no;
+        let bytes_outstanding: u32 = (sent_seq_no - base_seq_no).into();
+        let bytes_acknowledged: u32 = (ack_seq_no - base_seq_no).into();
 
         if bytes_acknowledged > bytes_outstanding {
             return Err(Fail::Ignored {
@@ -230,7 +229,7 @@ impl<RT: Runtime> Sender<RT> {
         let rto: Duration = self.current_rto();
         self.congestion_ctrl
             .on_ack_received(rto, base_seq_no, sent_seq_no, ack_seq_no);
-        if bytes_acknowledged == Wrapping(0) {
+        if bytes_acknowledged == 0 {
             return Ok(());
         }
 
@@ -244,7 +243,7 @@ impl<RT: Runtime> Sender<RT> {
         }
 
         // TODO: Do acks need to be on segment boundaries? How does this interact with repacketization?
-        let mut bytes_remaining = bytes_acknowledged.0 as usize;
+        let mut bytes_remaining = bytes_acknowledged as usize;
         while let Some(segment) = self.unacked_queue.borrow_mut().pop_front() {
             if segment.bytes.len() > bytes_remaining {
                 // TODO: We need to close the connection in this case.
@@ -263,10 +262,11 @@ impl<RT: Runtime> Sender<RT> {
                 break;
             }
         }
-        self.base_seq_no.modify(|b| b + bytes_acknowledged);
+        self.base_seq_no.modify(|b| b + SeqNumber::from(bytes_acknowledged));
         let new_base_seq_no = self.base_seq_no.get();
         if new_base_seq_no < base_seq_no {
             // We've wrapped around, and so we need to do some bookkeeping
+            // ToDo: Figure out what this is doing -- it's probably wrong.
             self.congestion_ctrl.on_base_seq_no_wraparound();
         }
 
@@ -343,7 +343,7 @@ impl<RT: Runtime> Sender<RT> {
         self.congestion_ctrl.on_fast_retransmit()
     }
 
-    pub fn congestion_ctrl_on_rto(&self, base_seq_no: Wrapping<u32>) {
+    pub fn congestion_ctrl_on_rto(&self, base_seq_no: SeqNumber) {
         self.congestion_ctrl.on_rto(base_seq_no)
     }
 

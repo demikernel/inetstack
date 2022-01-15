@@ -28,13 +28,14 @@ use crate::{
     runtime::Runtime,
 };
 use std::{
-    num::Wrapping,
     rc::Rc,
     task::{Context, Poll},
     time::Duration,
     time::Instant,
 };
 
+// ToDo: Review this.  The TCP Specification doesn't have states called ActiveClose, FinWait3, Closing2, TimeWait2,
+// PassiveClose, CloseWait2 or Reset.  And it has states Listen, SynReceived, and SynSent, which aren't listed here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
     Established,
@@ -154,7 +155,7 @@ impl<RT: Runtime> ControlBlock<RT> {
         self.sender.congestion_ctrl_on_fast_retransmit()
     }
 
-    pub fn congestion_ctrl_on_rto(&self, base_seq_no: Wrapping<u32>) {
+    pub fn congestion_ctrl_on_rto(&self, base_seq_no: SeqNumber) {
         self.sender.congestion_ctrl_on_rto(base_seq_no)
     }
 
@@ -183,27 +184,27 @@ impl<RT: Runtime> ControlBlock<RT> {
         self.sender.get_window_size()
     }
 
-    pub fn get_base_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_base_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.sender.get_base_seq_no()
     }
 
-    pub fn get_unsent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_unsent_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.sender.get_unsent_seq_no()
     }
 
-    pub fn get_sent_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_sent_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.sender.get_sent_seq_no()
     }
 
-    pub fn modify_sent_seq_no(&self, f: impl FnOnce(Wrapping<u32>) -> Wrapping<u32>) {
+    pub fn modify_sent_seq_no(&self, f: impl FnOnce(SeqNumber) -> SeqNumber) {
         self.sender.modify_sent_seq_no(f)
     }
 
-    pub fn get_last_ack_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_last_ack_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.receiver.get_ack_seq_no()
     }
 
-    pub fn get_last_recv_seq_no(&self) -> (Wrapping<u32>, WatchFuture<Wrapping<u32>>) {
+    pub fn get_last_recv_seq_no(&self) -> (SeqNumber, WatchFuture<SeqNumber>) {
         self.receiver.get_recv_seq_no()
     }
 
@@ -305,6 +306,7 @@ impl<RT: Runtime> ControlBlock<RT> {
         }
         if !data.is_empty() {
             if self.state.get() != State::Established {
+                // ToDo: Review this warning.  TCP connections in FIN_WAIT_1 and FIN_WAIT_2 can still receive data.
                 warn!("Receiver closed");
             }
             if let Err(e) = self.receiver.receive_data(header.seq_num, data, now) {
@@ -330,6 +332,8 @@ impl<RT: Runtime> ControlBlock<RT> {
 
         // Check if we have acknowledged all bytes that we have received. If not, piggy back an ACK
         // on this message.
+        // ToDo: This is a bug (or two).  Except for an active open SYN where we don't yet have a remote sequence
+        // number to acknowledge, we should *always* ACK.
         if self.state.get() != State::CloseWait2 {
             if let Some(ack_seq_no) = self.receiver.current_ack() {
                 header.ack_num = ack_seq_no;
@@ -344,7 +348,7 @@ impl<RT: Runtime> ControlBlock<RT> {
         if header.ack {
             let (recv_seq_no, _) = self.receiver.get_recv_seq_no();
             if self.state.get() == State::PassiveClose || self.state.get() == State::FinWait3 {
-                assert_eq!(header.ack_num, recv_seq_no + Wrapping(1));
+                assert_eq!(header.ack_num, recv_seq_no + SeqNumber::from(1));
             } else {
                 assert_eq!(header.ack_num, recv_seq_no);
             }

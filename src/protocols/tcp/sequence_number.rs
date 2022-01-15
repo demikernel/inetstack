@@ -20,8 +20,16 @@ use std::cmp::Ordering;
 // restrict all other behaviors to those we explicitly define below.
 //
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct SeqNumber {
+pub struct SeqNumber {
     value: u32,
+}
+
+// To create a u32 from a sequence number.
+impl From<SeqNumber> for u32 {
+    #[inline]
+    fn from(item: SeqNumber) -> u32 {
+        item.value
+    }
 }
 
 // To create a sequence number from a u32.
@@ -105,6 +113,7 @@ impl std::cmp::PartialOrd for SeqNumber {
 mod tests {
     use super::SeqNumber;
 
+    // Test basic comparisons between sequence numbers of various values.
     #[test]
     fn comparison() {
         let s0:SeqNumber = SeqNumber::from(0);
@@ -133,6 +142,7 @@ mod tests {
         assert!(s0 > s7);
     }
 
+    // Test that basic comparisons (and addition) handle wrap around properly.
     #[test]
     fn wrap_around() {
         let zero = SeqNumber::from(0);

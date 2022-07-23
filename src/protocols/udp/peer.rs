@@ -64,6 +64,7 @@ use ::std::{
 
 #[cfg(feature = "profiler")]
 use ::runtime::perftools::timer;
+use libc::EPERM;
 
 //======================================================================================================================
 // Constants
@@ -121,7 +122,7 @@ impl<RT: NetworkRuntime + Clone + 'static> UdpPeer<RT> {
         local_ipv4_addr: Ipv4Addr,
         offload_checksum: bool,
         arp: ArpPeer<RT>,
-    ) -> Self {
+    ) -> Result<Self, Fail> {
         let send_queue: SharedQueue<SharedQueueSlot<Buffer>> =
             SharedQueue::<SharedQueueSlot<Buffer>>::new(SEND_QUEUE_MAX_SIZE);
         let future = Self::background_sender(
@@ -134,11 +135,11 @@ impl<RT: NetworkRuntime + Clone + 'static> UdpPeer<RT> {
         );
         let handle: SchedulerHandle = match scheduler.insert(FutureOperation::Background::<RT>(future.boxed_local())) {
             Some(handle) => handle,
-            None => panic!("failed to insert task in the scheduler"),
+            None => return Err(Fail::new(EPERM, "failed to insert task in the scheduler")),
         };
         let mut rng: SmallRng = SmallRng::from_seed(rng_seed);
         let ephemeral_ports: EphemeralPorts = EphemeralPorts::new(&mut rng);
-        Self {
+        Ok(Self {
             rt: rt.clone(),
             arp,
             ephemeral_ports,
@@ -149,7 +150,7 @@ impl<RT: NetworkRuntime + Clone + 'static> UdpPeer<RT> {
             local_ipv4_addr,
             checksum_offload: offload_checksum,
             background: handle,
-        }
+        })
     }
 
     /// Asynchronously send unsent datagrams to remote peer.

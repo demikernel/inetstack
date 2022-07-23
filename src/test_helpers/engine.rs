@@ -53,7 +53,7 @@ impl<RT: NetworkRuntime + Clone + 'static> Engine<RT> {
         let file_table = IoQueueTable::new();
         let arp = ArpPeer::new(rt.clone(), scheduler.clone(), clock.clone(), rt.arp_options())?;
         let rng_seed: [u8; 32] = [0; 32];
-        let ipv4 = Peer::new(rt.clone(), scheduler.clone(), clock.clone(), arp.clone(), rng_seed);
+        let ipv4 = Peer::new(rt.clone(), scheduler.clone(), clock.clone(), arp.clone(), rng_seed)?;
         Ok(Engine {
             rt,
             clock,

@@ -64,6 +64,7 @@ use ::std::{
     rc::Rc,
     time::Duration,
 };
+use libc::EPERM;
 
 //==============================================================================
 // ReqQueue
@@ -132,16 +133,22 @@ pub struct Icmpv4Peer<RT: NetworkRuntime + Clone + 'static> {
 
 impl<RT: NetworkRuntime + Clone + 'static> Icmpv4Peer<RT> {
     /// Creates a new peer for handling ICMP.
-    pub fn new(rt: RT, scheduler: Scheduler, clock: TimerRc, arp: ArpPeer<RT>, rng_seed: [u8; 32]) -> Icmpv4Peer<RT> {
+    pub fn new(
+        rt: RT,
+        scheduler: Scheduler,
+        clock: TimerRc,
+        arp: ArpPeer<RT>,
+        rng_seed: [u8; 32],
+    ) -> Result<Icmpv4Peer<RT>, Fail> {
         let (tx, rx) = mpsc::unbounded();
         let requests = ReqQueue::new();
         let rng: Rc<RefCell<SmallRng>> = Rc::new(RefCell::new(SmallRng::from_seed(rng_seed)));
         let future = Self::background(rt.clone(), arp.clone(), rx);
         let handle: SchedulerHandle = match scheduler.insert(FutureOperation::Background::<RT>(future.boxed_local())) {
             Some(handle) => handle,
-            None => panic!("failed to insert task in the scheduler"),
+            None => return Err(Fail::new(EPERM, "failed to insert task in the scheduler")),
         };
-        Icmpv4Peer {
+        Ok(Icmpv4Peer {
             rt,
             clock,
             arp,
@@ -150,7 +157,7 @@ impl<RT: NetworkRuntime + Clone + 'static> Icmpv4Peer<RT> {
             seq: Wrapping(0),
             rng,
             background: handle,
-        }
+        })
     }
 
     /// Background task for replying to ICMP messages.

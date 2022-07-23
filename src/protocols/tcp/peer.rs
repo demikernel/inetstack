@@ -127,7 +127,13 @@ pub struct TcpPeer<RT: NetworkRuntime + Clone + 'static> {
 //==============================================================================
 
 impl<RT: NetworkRuntime + Clone + 'static> TcpPeer<RT> {
-    pub fn new(rt: RT, scheduler: Scheduler, clock: TimerRc, arp: ArpPeer<RT>, rng_seed: [u8; 32]) -> Self {
+    pub fn new(
+        rt: RT,
+        scheduler: Scheduler,
+        clock: TimerRc,
+        arp: ArpPeer<RT>,
+        rng_seed: [u8; 32],
+    ) -> Result<Self, Fail> {
         let (tx, rx) = mpsc::unbounded();
         let inner = Rc::new(RefCell::new(Inner::new(
             rt.clone(),
@@ -138,7 +144,7 @@ impl<RT: NetworkRuntime + Clone + 'static> TcpPeer<RT> {
             tx,
             rx,
         )));
-        Self { inner }
+        Ok(Self { inner })
     }
 
     /// Opens a TCP socket.

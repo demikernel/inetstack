@@ -101,7 +101,7 @@ impl<RT: NetworkRuntime + Clone + 'static> InetStack<RT> {
     pub fn new(rt: RT, scheduler: Scheduler, clock: TimerRc, rng_seed: [u8; 32]) -> Result<Self, Fail> {
         let file_table: IoQueueTable = IoQueueTable::new();
         let arp: ArpPeer<RT> = ArpPeer::new(rt.clone(), scheduler.clone(), clock.clone(), rt.arp_options())?;
-        let ipv4: Peer<RT> = Peer::new(rt.clone(), scheduler.clone(), clock.clone(), arp.clone(), rng_seed);
+        let ipv4: Peer<RT> = Peer::new(rt.clone(), scheduler.clone(), clock.clone(), arp.clone(), rng_seed)?;
         Ok(Self {
             arp,
             ipv4,
